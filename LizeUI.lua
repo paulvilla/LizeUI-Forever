@@ -343,6 +343,17 @@ local function updateIssueReportButton(hidden)
     end
 end
 
+-- En combate Blizzard marca sus botones nativos de auras como "forbidden":
+-- llamar a cualquier metodo sobre ellos desde codigo de addon lanza error.
+-- IsForbidden() es el unico metodo permitido desde codigo inseguro.
+local function isForbiddenFrame(frame)
+    if not frame then return false end
+    local ok, forbidden = pcall(function()
+        return frame.IsForbidden and frame:IsForbidden() or false
+    end)
+    return ok and forbidden == true
+end
+
 local function updateBuffDebuffBorders(enabled)
     -- Asegurar que BBF muestre/oculte los bordes de debuff
     if BetterBlizzFramesDB then
@@ -363,8 +374,7 @@ local function updateBuffDebuffBorders(enabled)
         end
     end
 
-    local function applyBorderToButton(button, isDebuff)
-        if not button then return end
+    local function applyBorderToButtonUnsafe(button, isDebuff)
         local anchor = button.bbfIcon or button
         -- Recrear la textura siempre para evitar que atlas/texture se queden pegados
         if button.lizeUIBorder then
@@ -411,6 +421,14 @@ local function updateBuffDebuffBorders(enabled)
             end
         end
         button.lizeUIBorder:SetShown(enabled)
+    end
+
+    local function applyBorderToButton(button, isDebuff)
+        if not button or isForbiddenFrame(button) then return end
+        -- En combate el boton (y sus hijos, incluida nuestra textura) pueden
+        -- quedar prohibidos a mitad de operacion: pcall evita romper el
+        -- restyle de BBF; el borde creado fuera de combate sigue visible.
+        pcall(applyBorderToButtonUnsafe, button, isDebuff)
     end
 
     -- Botones nativos legacy (Classic antiguo)
@@ -461,21 +479,21 @@ local function updateBuffDebuffBorders(enabled)
     if enabled then
         for i = 1, 16 do
             local btn = _G["DebuffButton" .. i]
-            if btn and btn.ClearDispelTypeTextures then
-                btn:ClearDispelTypeTextures()
+            if btn and not isForbiddenFrame(btn) and btn.ClearDispelTypeTextures then
+                pcall(btn.ClearDispelTypeTextures, btn)
             end
         end
         if BuffFrame and BuffFrame.auraFrames then
             for _, btn in ipairs(BuffFrame.auraFrames) do
-                if btn and btn.ClearDispelTypeTextures then
-                    btn:ClearDispelTypeTextures()
+                if btn and not isForbiddenFrame(btn) and btn.ClearDispelTypeTextures then
+                    pcall(btn.ClearDispelTypeTextures, btn)
                 end
             end
         end
         if DebuffFrame and DebuffFrame.auraFrames then
             for _, btn in ipairs(DebuffFrame.auraFrames) do
-                if btn and btn.ClearDispelTypeTextures then
-                    btn:ClearDispelTypeTextures()
+                if btn and not isForbiddenFrame(btn) and btn.ClearDispelTypeTextures then
+                    pcall(btn.ClearDispelTypeTextures, btn)
                 end
             end
         end
@@ -488,8 +506,8 @@ local function updateBuffDebuffBorders(enabled)
                         local count = container:HasAuraGroup(styleKey) and container:GetAuraGroupFrameCount(styleKey) or 0
                         for i = 1, count do
                             local button = container:GetAuraGroupFrame(styleKey, i)
-                            if button and button.ClearDispelTypeTextures then
-                                button:ClearDispelTypeTextures()
+                            if button and not isForbiddenFrame(button) and button.ClearDispelTypeTextures then
+                                pcall(button.ClearDispelTypeTextures, button)
                             end
                         end
                     end
@@ -500,8 +518,7 @@ local function updateBuffDebuffBorders(enabled)
 end
 
 local function updateTargetAuraBorders(enabled)
-    local function applyTargetBorder(button, isDebuff)
-        if not button then return end
+    local function applyTargetBorderUnsafe(button, isDebuff)
         local icon = button.bbfIcon or button.Icon or button.icon
         local anchor = icon or button
         local borderSize = 35
@@ -564,6 +581,13 @@ local function updateTargetAuraBorders(enabled)
         button.lizeUITargetBorder:SetShown(enabled)
     end
 
+    local function applyTargetBorder(button, isDebuff)
+        if not button or isForbiddenFrame(button) then return end
+        -- Misma proteccion que en buffs: en combate el boton y sus hijos
+        -- pueden quedar prohibidos a mitad de operacion.
+        pcall(applyTargetBorderUnsafe, button, isDebuff)
+    end
+
     local targetFrame = TargetFrame
     if not targetFrame then return end
 
@@ -588,7 +612,10 @@ local function updateTargetAuraBorders(enabled)
         if not buffFrames and not debuffFrames then
             local children = {auraContainer:GetChildren()}
             for _, btn in ipairs(children) do
-                if btn:IsObjectType("Frame") or btn:IsObjectType("Button") then
+                local okChild, isButton = pcall(function()
+                    return not isForbiddenFrame(btn) and (btn:IsObjectType("Frame") or btn:IsObjectType("Button"))
+                end)
+                if okChild and isButton then
                     local isDebuff = btn.auraType == "DEBUFF" or btn.auraType == "HARMFUL"
                     applyTargetBorder(btn, isDebuff)
                 end
@@ -618,8 +645,8 @@ local function updateTargetAuraBorders(enabled)
         local auraContainer = targetFrame.GetAuraContainer and targetFrame:GetAuraContainer()
         if auraContainer and auraContainer.debuffFrames then
             for _, btn in ipairs(auraContainer.debuffFrames) do
-                if btn and btn.ClearDispelTypeTextures then
-                    btn:ClearDispelTypeTextures()
+                if btn and not isForbiddenFrame(btn) and btn.ClearDispelTypeTextures then
+                    pcall(btn.ClearDispelTypeTextures, btn)
                 end
             end
         end
