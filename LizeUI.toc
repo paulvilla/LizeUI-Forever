@@ -1,10 +1,13 @@
-## Interface: 11507
+## Interface: 16001
 ## Title: LizeUI
 ## Notes: LizeUI importa perfiles guardados de BetterBlizzFrames y BetterBlizzPlates.
 ## Author: Local
+## X-Curse-Project-ID: 1710996
 ## Version: 1.0.0
 ## OptionalDeps: BetterBlizzFrames, BetterBlizzPlates, LibSharedMedia-3.0, DialogueUI
 ## SavedVariables: LizeUIDB, LoadProfilesDB
+
+
 
 Libs\LibStub\LibStub.lua
 Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
