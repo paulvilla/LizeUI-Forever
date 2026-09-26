@@ -3,8 +3,9 @@
 ## Notes: LizeUI importa perfiles guardados de BetterBlizzFrames y BetterBlizzPlates.
 ## Author: Local
 ## X-Curse-Project-ID: 1710996
-## Version: 1.0.0
-## OptionalDeps: BetterBlizzFrames, BetterBlizzPlates, LibSharedMedia-3.0, DialogueUI
+## Version: 1.1.0
+## Dependencies: BetterBlizzFrames
+## OptionalDeps: BetterBlizzPlates, LibSharedMedia-3.0, DialogueUI
 ## SavedVariables: LizeUIDB, LoadProfilesDB
 
 
