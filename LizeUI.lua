@@ -232,7 +232,10 @@ local function createSettingsCheckboxCustom(panel, text, point, databaseKey, onT
     return checkbox, label
 end
 
-local function createSettingsSlider(panel, name, minVal, maxVal, step, defaultVal, point, databaseKey, onValueChanged)
+local function createSettingsSlider(panel, name, minVal, maxVal, step, defaultVal, point, databaseKey, onValueChanged, decimals, displayFormat)
+    decimals = decimals or 0
+    displayFormat = displayFormat or "Desplazamiento: %s"
+
     local slider = CreateFrame("Slider", name, panel, "OptionsSliderTemplate")
     slider:SetPoint(unpack(point))
     slider:SetSize(180, 17)
@@ -259,6 +262,9 @@ local function createSettingsSlider(panel, name, minVal, maxVal, step, defaultVa
     valueDisplay:SetPoint("BOTTOM", slider, "TOP", 0, 4)
 
     local function formatValue(val)
+        if decimals > 0 then
+            return string.format("%." .. decimals .. "f", val)
+        end
         if val > 0 then
             return "+" .. val
         else
@@ -279,7 +285,7 @@ local function createSettingsSlider(panel, name, minVal, maxVal, step, defaultVa
         isUpdatingValue = true
         slider:SetValue(currentVal)
         isUpdatingValue = false
-        valueDisplay:SetText("Desplazamiento: " .. formatValue(currentVal))
+        valueDisplay:SetText(string.format(displayFormat, formatValue(currentVal)))
     end
     refresh()
 
@@ -288,11 +294,16 @@ local function createSettingsSlider(panel, name, minVal, maxVal, step, defaultVa
     end
 
     slider:SetScript("OnValueChanged", function(self, value)
-        value = math.floor(value + 0.5)
+        if decimals > 0 then
+            local mult = 10 ^ decimals
+            value = math.floor(value * mult + 0.5) / mult
+        else
+            value = math.floor(value + 0.5)
+        end
         if not isUpdatingValue then
             database[databaseKey] = value
         end
-        valueDisplay:SetText("Desplazamiento: " .. formatValue(value))
+        valueDisplay:SetText(string.format(displayFormat, formatValue(value)))
         if onValueChanged and not isUpdatingValue then
             onValueChanged(value)
         end
@@ -307,7 +318,6 @@ local function createSettingsSlider(panel, name, minVal, maxVal, step, defaultVa
         self:SetValue(newV)
     end)
 
-    slider.Refresh = refresh
     return slider, valueDisplay
 end
 
@@ -653,6 +663,274 @@ local function updateTargetAuraBorders(enabled)
     end
 end
 
+-- Replica de la logica de colores de BBF.DarkmodeFrames para action bars
+local function getDarkActionBarColors()
+    local v = (BetterBlizzFramesDB and tonumber(BetterBlizzFramesDB.darkModeColor)) or 0.20
+    if v == 0 then
+        return 0, 0.2
+    end
+    return v + 0.15, v + 0.25
+end
+
+-- BBF instala hooks de SetVertexColor que capturan el color viejo y revierten
+-- cualquier cambio posterior. No podemos controlar el orden de la cadena de
+-- hooks, asi que este hook programa la correccion para justo despues de que
+-- termine la cadena (C_Timer 0) y usa la propia flag "changing" de BBF para
+-- neutralizar su hook mientras aplicamos el color actual de la DB.
+-- Texturas pendientes de correccion; se procesan todas juntas en UN solo
+-- timer por frame como maximo, en vez de un timer por textura.
+local darkDirtyTextures = {}
+local darkDirtyScheduled = false
+
+local function lizeDarkActionBarHook(self)
+    if self.lizeUIDarkChanging then return end
+    local db = BetterBlizzFramesDB
+    if not db then return end
+    if not (db.darkModeUi and db.darkModeActionBars) and not self.lizeUIDarkTinted then return end
+    darkDirtyTextures[self] = true
+    if darkDirtyScheduled then return end
+    darkDirtyScheduled = true
+    C_Timer.After(0, function()
+        darkDirtyScheduled = false
+        local dbNow = BetterBlizzFramesDB
+        local on = dbNow and dbNow.darkModeUi and dbNow.darkModeActionBars
+        local barColor, birdColor = getDarkActionBarColors()
+        for tex in pairs(darkDirtyTextures) do
+            darkDirtyTextures[tex] = nil
+            tex.lizeUIDarkChanging = true
+            tex.changing = true -- neutraliza el hook viejo de BBF
+            if on then
+                local color = tex.lizeUIDarkBird and birdColor or barColor
+                if tex.SetDesaturated then
+                    tex:SetDesaturated(true)
+                end
+                tex:SetVertexColor(color, color, color)
+                tex.lizeUIDarkTinted = true
+            else
+                if tex.SetDesaturated then
+                    tex:SetDesaturated(false)
+                end
+                tex:SetVertexColor(1, 1, 1)
+                tex.lizeUIDarkTinted = false
+            end
+            tex.changing = false
+            tex.lizeUIDarkChanging = false
+        end
+    end)
+end
+
+local function refreshDarkActionBarTexture(texture, isBird)
+    if not texture or not texture.SetVertexColor then return end
+    local ok, forbidden = pcall(function()
+        return (issecretvalue and issecretvalue(texture)) or (texture.IsForbidden and texture:IsForbidden()) or false
+    end)
+    if not ok or forbidden then return end
+    local db = BetterBlizzFramesDB
+    local on = db and db.darkModeUi and db.darkModeActionBars
+    if not on and not texture.lizeUIDarkTinted then return end
+    texture.lizeUIDarkBird = isBird and true or false
+    if not texture.lizeUIDarkHooked then
+        texture.lizeUIDarkHooked = true
+        hooksecurefunc(texture, "SetVertexColor", lizeDarkActionBarHook)
+    end
+    -- Aplica el color directamente neutralizando el hook viejo de BBF con su
+    -- propia flag "changing" durante la operacion.
+    texture.lizeUIDarkChanging = true
+    texture.changing = true
+    if on then
+        local barColor, birdColor = getDarkActionBarColors()
+        local color = isBird and birdColor or barColor
+        if texture.SetDesaturated then
+            texture:SetDesaturated(true)
+        end
+        texture:SetVertexColor(color, color, color)
+        texture.lizeUIDarkTinted = true
+    else
+        if texture.SetDesaturated then
+            texture:SetDesaturated(false)
+        end
+        texture:SetVertexColor(1, 1, 1)
+        texture.lizeUIDarkTinted = false
+    end
+    texture.changing = false
+    texture.lizeUIDarkChanging = false
+end
+
+-- Recorre los mismos frames que BBF.ApplyActionBarArt tine con hook=true
+local function syncDarkActionBars()
+    if not BetterBlizzFramesDB then return end
+
+    local mainActionBar = _G.MainMenuBar or _G.MainActionBar
+
+    -- Bordes de botones de accion (NormalTexture)
+    local buttonPrefixes = {
+        "ActionButton",
+        "MultiBarBottomLeftButton",
+        "MultiBarBottomRightButton",
+        "MultiBarRightButton",
+        "MultiBarLeftButton",
+        "MultiBar5Button",
+        "MultiBar6Button",
+        "MultiBar7Button",
+        "PetActionButton",
+        "StanceButton",
+    }
+    for _, prefix in ipairs(buttonPrefixes) do
+        for i = 1, 12 do
+            local button = _G[prefix .. i]
+            -- API moderna: la textura es un campo del boton (ActionButton1.NormalTexture)
+            if button then
+                refreshDarkActionBarTexture(button.NormalTexture)
+            end
+            -- Fallback clientes antiguos: textura global con nombre
+            refreshDarkActionBarTexture(_G[prefix .. i .. "NormalTexture"])
+        end
+    end
+
+    -- Divisores entre botones de la barra principal
+    for i = 1, 11 do
+        local button = _G["ActionButton" .. i]
+        refreshDarkActionBarTexture(button and button.RightDivider)
+    end
+
+    -- Arte de la barra principal y grifos (EndCaps)
+    if mainActionBar then
+        refreshDarkActionBarTexture(mainActionBar.BorderArt)
+        if mainActionBar.EndCaps then
+            for _, cap in ipairs({mainActionBar.EndCaps.LeftEndCap, mainActionBar.EndCaps.RightEndCap}) do
+                -- La cap puede ser una Texture directa o un Frame con .Texture
+                refreshDarkActionBarTexture(cap, true)
+                refreshDarkActionBarTexture(cap and cap.Texture, true)
+                -- O un Frame con regiones Texture sin nombre
+                if cap and cap.GetRegions then
+                    for _, region in ipairs({cap:GetRegions()}) do
+                        if region:IsObjectType("Texture") then
+                            refreshDarkActionBarTexture(region, true)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    -- Fallback clientes clasicos: texturas globales de los remates
+    refreshDarkActionBarTexture(_G["MainMenuBarLeftEndCap"], true)
+    refreshDarkActionBarTexture(_G["MainMenuBarRightEndCap"], true)
+
+    -- Botones de bolsas
+    local function refreshButtonArt(button, buttonName)
+        if not button then return end
+        if button.GetNormalTexture then
+            local ok, tex = pcall(button.GetNormalTexture, button)
+            if ok then refreshDarkActionBarTexture(tex) end
+        end
+        if button.GetPushedTexture then
+            local ok, tex = pcall(button.GetPushedTexture, button)
+            if ok then refreshDarkActionBarTexture(tex) end
+        end
+        if buttonName then
+            refreshDarkActionBarTexture(_G[buttonName .. "NormalTexture"])
+            refreshDarkActionBarTexture(_G[buttonName .. "PushedTexture"])
+        end
+        refreshDarkActionBarTexture(button.NormalTexture)
+        refreshDarkActionBarTexture(button.PushedTexture)
+        refreshDarkActionBarTexture(button.Background)
+        refreshDarkActionBarTexture(button.PushedBackground)
+    end
+
+    -- Micro menu
+    if MicroMenu then
+        refreshDarkActionBarTexture(MicroMenu.BorderArt)
+    end
+    for _, microButtonName in ipairs({
+        "CharacterMicroButton", "ProfessionMicroButton", "SpellbookMicroButton",
+        "TalentMicroButton", "LegacyMicroButton", "QuestLogMicroButton",
+        "GuildMicroButton", "LFDMicroButton", "CollectionsMicroButton",
+        "HelpMicroButton", "StoreMicroButton", "MainMenuMicroButton",
+    }) do
+        local button = _G[microButtonName]
+        if button then
+            refreshDarkActionBarTexture(button.Background)
+            refreshDarkActionBarTexture(button.PushedBackground)
+        end
+    end
+
+    -- Barra de bolsas
+    local function refreshEdgeArt(frame)
+        if not frame then return end
+        refreshDarkActionBarTexture(frame.TopEdge)
+        refreshDarkActionBarTexture(frame.BottomEdge)
+        refreshDarkActionBarTexture(frame.Center)
+    end
+    if BagsBar then
+        refreshDarkActionBarTexture(BagsBar.BorderArt)
+        refreshEdgeArt(BagsBar)
+        for _, child in pairs({BagsBar:GetChildren()}) do
+            refreshEdgeArt(child)
+            for _, grandChild in pairs({child:GetChildren()}) do
+                refreshEdgeArt(grandChild)
+            end
+        end
+    end
+
+    refreshButtonArt(KeyRingButton, "KeyRingButton")
+    refreshButtonArt(MainMenuBarBackpackButton, "MainMenuBarBackpackButton")
+    refreshButtonArt(CharacterReagentBag0Slot, "CharacterReagentBag0Slot")
+    for i = 0, 3 do
+        local bagSlotName = "CharacterBag" .. i .. "Slot"
+        refreshButtonArt(_G[bagSlotName], bagSlotName)
+    end
+end
+
+local function applyDarkModeSettings(light)
+    if not BetterBlizzFramesDB then return end
+    if BBF then
+        if BBF.UpdateUserDarkModeSettings then
+            BBF.UpdateUserDarkModeSettings()
+        end
+        if BBF.DarkmodeFrames then
+            BBF.DarkmodeFrames(true)
+        end
+        if BetterBlizzFramesDB.darkModeUi then
+            if BBF.DarkModeCastbars then
+                BBF.DarkModeCastbars()
+            end
+            -- Estas solo hacen falta al activar/desactivar o en la carga, no en
+            -- cada tick del slider (DarkModeUnitframeBorders re-estiliza auras)
+            if not light then
+                if BBF.DarkModeUnitframeBorders then
+                    BBF.DarkModeUnitframeBorders()
+                end
+                if BBF.CheckForAuraBorders then
+                    BBF.CheckForAuraBorders()
+                end
+                if BBF.updateTotemBorders then
+                    BBF.updateTotemBorders()
+                end
+            end
+        end
+    end
+    syncDarkActionBars()
+end
+
+-- El slider aplica con debounce: solo se refresca la UI cuando el usuario deja
+-- de moverlo, evitando decenas de aplicaciones completas por arrastre.
+local darkModeApplyTimer
+local function queueDarkModeApply()
+    if darkModeApplyTimer then
+        darkModeApplyTimer:Cancel()
+    end
+    darkModeApplyTimer = C_Timer.NewTimer(0.15, function()
+        darkModeApplyTimer = nil
+        applyDarkModeSettings(true)
+    end)
+end
+local function cancelDarkModeApply()
+    if darkModeApplyTimer then
+        darkModeApplyTimer:Cancel()
+        darkModeApplyTimer = nil
+    end
+end
+
 local function createSettings()
     if not Settings or not Settings.RegisterCanvasLayoutCategory then
         return
@@ -680,7 +958,93 @@ local function createSettings()
         end
     )
 
-    infoInstanciaButton = createSettingsButton(basePanel, "Info Instancia", 214, { "TOP", basePanel, "TOP", 0, -420 }, function()
+    -- Dark Mode: lee/escribe directamente la base de datos de BetterBlizzFrames
+    local darkModeSlider
+    local function updateDarkModeSliderState(enabled)
+        if darkModeSlider then
+            if enabled then
+                darkModeSlider:Enable()
+                darkModeSlider:SetAlpha(1.0)
+            else
+                darkModeSlider:Disable()
+                darkModeSlider:SetAlpha(0.5)
+            end
+        end
+    end
+
+    local darkModeCheckbox = CreateFrame("CheckButton", nil, basePanel, "UICheckButtonTemplate")
+    darkModeCheckbox:SetPoint("TOPLEFT", basePanel, "TOPLEFT", 35, -80)
+    local darkModeCheckboxLabel = basePanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    darkModeCheckboxLabel:SetPoint("LEFT", darkModeCheckbox, "RIGHT", 8, 0)
+    darkModeCheckboxLabel:SetText("Activar Dark Mode")
+    darkModeCheckbox:SetScript("OnClick", function(self)
+        local isChecked = self:GetChecked() and true or false
+        if BetterBlizzFramesDB then
+            BetterBlizzFramesDB.darkModeUi = isChecked
+        end
+        updateDarkModeSliderState(isChecked)
+        cancelDarkModeApply()
+        applyDarkModeSettings()
+    end)
+    darkModeCheckbox.Refresh = function(self)
+        self:SetChecked(BetterBlizzFramesDB and BetterBlizzFramesDB.darkModeUi == true)
+    end
+
+    darkModeSlider = CreateFrame("Slider", "LizeUIDarkModeIntensitySlider", basePanel, "OptionsSliderTemplate")
+    darkModeSlider:SetPoint("TOPLEFT", basePanel, "TOPLEFT", 360, -80)
+    darkModeSlider:SetSize(180, 17)
+    darkModeSlider:SetMinMaxValues(0, 1)
+    darkModeSlider:SetValueStep(0.05)
+    darkModeSlider:SetObeyStepOnDrag(true)
+    local darkModeSliderLow = _G["LizeUIDarkModeIntensitySliderLow"] or darkModeSlider.Low
+    local darkModeSliderHigh = _G["LizeUIDarkModeIntensitySliderHigh"] or darkModeSlider.High
+    local darkModeSliderText = _G["LizeUIDarkModeIntensitySliderText"] or darkModeSlider.Text
+    if darkModeSliderLow then
+        darkModeSliderLow:SetText("0")
+        darkModeSliderLow:ClearAllPoints()
+        darkModeSliderLow:SetPoint("TOPLEFT", darkModeSlider, "BOTTOMLEFT", 2, -4)
+    end
+    if darkModeSliderHigh then
+        darkModeSliderHigh:SetText("1")
+        darkModeSliderHigh:ClearAllPoints()
+        darkModeSliderHigh:SetPoint("TOPRIGHT", darkModeSlider, "BOTTOMRIGHT", -2, -4)
+    end
+    if darkModeSliderText then
+        darkModeSliderText:SetText("")
+    end
+    local darkModeSliderValueDisplay = basePanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    darkModeSliderValueDisplay:SetPoint("BOTTOM", darkModeSlider, "TOP", 0, 4)
+    local darkModeSliderUpdating = false
+    darkModeSlider.Refresh = function(self)
+        local currentVal = (BetterBlizzFramesDB and tonumber(BetterBlizzFramesDB.darkModeColor)) or 0.20
+        darkModeSliderUpdating = true
+        self:SetValue(currentVal)
+        darkModeSliderUpdating = false
+        darkModeSliderValueDisplay:SetText(string.format("Intensidad: %.2f", currentVal))
+    end
+    darkModeSlider:SetScript("OnValueChanged", function(self, value)
+        value = math.floor(value * 100 + 0.5) / 100
+        darkModeSliderValueDisplay:SetText(string.format("Intensidad: %.2f", value))
+        if not darkModeSliderUpdating then
+            if BetterBlizzFramesDB then
+                BetterBlizzFramesDB.darkModeColor = value
+            end
+            queueDarkModeApply()
+        end
+    end)
+    darkModeSlider:EnableMouseWheel(true)
+    darkModeSlider:SetScript("OnMouseWheel", function(self, delta)
+        if not self:IsEnabled() then return end
+        local cur = self:GetValue()
+        local minV, maxV = self:GetMinMaxValues()
+        local newV = math.max(minV, math.min(maxV, cur + delta * 0.05))
+        self:SetValue(newV)
+    end)
+    darkModeCheckbox:Refresh()
+    darkModeSlider:Refresh()
+    updateDarkModeSliderState(BetterBlizzFramesDB and BetterBlizzFramesDB.darkModeUi == true)
+
+    infoInstanciaButton = createSettingsButton(basePanel, "Info Instancia", 214, { "TOP", basePanel, "TOP", 0, -455 }, function()
         -- 1. Obtener datos de instancia y mapa
         local name, instanceType, difficultyID, difficultyName, maxPlayers, dynamicDifficulty, isDynamic, instanceMapID, lfgDungeonID = GetInstanceInfo()
         local mapID = instanceMapID
@@ -736,7 +1100,7 @@ local function createSettings()
         printMessage("WHERE ld.Name_Lang LIKE '%" .. (nameLang or "") .. "%';")
     end)
 
-    createDivider(basePanel, "DialogueUI", -110)
+    createDivider(basePanel, "DialogueUI", -145)
 
     local dialogueUISlider, dialogueUISliderValDisplay
 
@@ -755,7 +1119,7 @@ local function createSettings()
     local dialogueUICheckbox = createSettingsCheckboxCustom(
         basePanel,
         "Modificar Campo de vision lateral",
-        { "TOPLEFT", basePanel, "TOPLEFT", 35, -140 },
+        { "TOPLEFT", basePanel, "TOPLEFT", 35, -175 },
         "modifyDialogueUICameraOffset",
         function(isChecked)
             updateSliderState(isChecked)
@@ -770,7 +1134,7 @@ local function createSettings()
         20,
         1,
         0,
-        { "TOPLEFT", basePanel, "TOPLEFT", 360, -145 },
+        { "TOPLEFT", basePanel, "TOPLEFT", 360, -180 },
         "dialogueUICameraOffset",
         function(val)
             notifyDialogueUI()
@@ -786,6 +1150,13 @@ local function createSettings()
         if issueReportCheckbox and issueReportCheckbox.Refresh then
             issueReportCheckbox:Refresh()
         end
+        if darkModeCheckbox and darkModeCheckbox.Refresh then
+            darkModeCheckbox:Refresh()
+        end
+        if darkModeSlider and darkModeSlider.Refresh then
+            darkModeSlider:Refresh()
+        end
+        updateDarkModeSliderState(BetterBlizzFramesDB and BetterBlizzFramesDB.darkModeUi == true)
         if dialogueUICheckbox and dialogueUICheckbox.Refresh then
             dialogueUICheckbox:Refresh()
         end
@@ -795,23 +1166,23 @@ local function createSettings()
         updateSliderState(database.modifyDialogueUICameraOffset == true)
     end
 
-    createDivider(basePanel, "Importaciones", -190)
+    createDivider(basePanel, "Importaciones", -225)
 
     local description = basePanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    description:SetPoint("TOPLEFT", basePanel, "TOPLEFT", 20, -220)
+    description:SetPoint("TOPLEFT", basePanel, "TOPLEFT", 20, -255)
     description:SetWidth(640)
     description:SetHeight(64)
     description:SetJustifyH("LEFT")
     description:SetJustifyV("TOP")
     description:SetText("LizeUI usa los addons BetterBlizzPlates y BetterBlizzFrames para conseguir una apariencia mejorada, sin cambiar la esencia de WoW Forever.\n\nAquí tienes unos botones para importar directamente las configuraciones que hemos preconfigurado, para que el juego se vea notablemente mejor.")
 
-    createSettingsButton(basePanel, "BetterBlizzFrames", 214, { "TOP", basePanel, "TOP", -110, -305 }, function()
+    createSettingsButton(basePanel, "BetterBlizzFrames", 214, { "TOP", basePanel, "TOP", -110, -340 }, function()
         importProfile("BBF", "ImportProfile", LoadProfilesBetterBlizzFrames, "BetterBlizzFrames")
     end)
-    createSettingsButton(basePanel, "BetterBlizzPlates", 214, { "TOP", basePanel, "TOP", 110, -305 }, function()
+    createSettingsButton(basePanel, "BetterBlizzPlates", 214, { "TOP", basePanel, "TOP", 110, -340 }, function()
         importProfile("BBP", "ImportProfile", LoadProfilesBetterBlizzPlater, "BetterBlizzPlates")
     end)
-    createSettingsButton(basePanel, "Reload", 214, { "TOP", basePanel, "TOP", 0, -365 }, function()
+    createSettingsButton(basePanel, "Reload", 214, { "TOP", basePanel, "TOP", 0, -400 }, function()
         database.windowOpened = true
         ReloadUI()
     end)
@@ -860,6 +1231,49 @@ SlashCmdList.LIZEUI = function(msg)
         database.devMode = not database.devMode
         printMessage("Modo desarrollador: " .. (database.devMode and "activado" or "desactivado"))
         updateDevModeVisibility()
+    elseif msg == "dark" then
+        local function describe(obj)
+            if obj == nil then return "NIL" end
+            local ok, objType = pcall(function() return obj:GetObjectType() end)
+            if not ok then return "ERROR" end
+            local extra = ""
+            if objType == "Texture" and obj.GetVertexColor then
+                local r, g, b = obj:GetVertexColor()
+                extra = string.format(" color=%.2f,%.2f,%.2f", r or -1, g or -1, b or -1)
+            end
+            return objType .. extra
+        end
+        local function report(name, obj)
+            printMessage(name .. ": " .. describe(obj))
+        end
+        local mainActionBar = _G.MainMenuBar or _G.MainActionBar
+        report("MainActionBar", mainActionBar)
+        report("MainActionBar.EndCaps", mainActionBar and mainActionBar.EndCaps)
+        if mainActionBar and mainActionBar.EndCaps then
+            local l = mainActionBar.EndCaps.LeftEndCap
+            local r = mainActionBar.EndCaps.RightEndCap
+            report("EndCaps.LeftEndCap", l)
+            report("EndCaps.LeftEndCap.Texture", l and l.Texture)
+            report("EndCaps.RightEndCap", r)
+            report("EndCaps.RightEndCap.Texture", r and r.Texture)
+        end
+        report("MainMenuBarLeftEndCap", _G["MainMenuBarLeftEndCap"])
+        report("ActionButton1", _G["ActionButton1"])
+        report("ActionButton1.NormalTexture", _G["ActionButton1"] and _G["ActionButton1"].NormalTexture)
+        report("ActionButton1NormalTexture", _G["ActionButton1NormalTexture"])
+        report("MultiBar5Button1", _G["MultiBar5Button1"])
+        report("MultiBar5Button1.NormalTexture", _G["MultiBar5Button1"] and _G["MultiBar5Button1"].NormalTexture)
+        report("MicroMenu", _G["MicroMenu"])
+        report("CharacterMicroButton.Background", _G["CharacterMicroButton"] and _G["CharacterMicroButton"].Background)
+        report("BagsBar", _G["BagsBar"])
+        report("MainMenuBarBackpackButton", _G["MainMenuBarBackpackButton"])
+        if BetterBlizzFramesDB then
+            printMessage("BBF darkModeUi=" .. tostring(BetterBlizzFramesDB.darkModeUi) ..
+                " darkModeActionBars=" .. tostring(BetterBlizzFramesDB.darkModeActionBars) ..
+                " darkModeColor=" .. tostring(BetterBlizzFramesDB.darkModeColor))
+        else
+            printMessage("BetterBlizzFramesDB no existe")
+        end
     else
         showWindow()
     end
@@ -948,6 +1362,7 @@ local function applyAllSettings()
     updateIssueReportButton(database.eliminarBotonIssueReport == true)
     updateBuffDebuffBorders(database.marcosIconosBuffDebuff == true)
     updateTargetAuraBorders(database.marcosIconosBuffDebuff == true)
+    applyDarkModeSettings()
     hookBBFFrames()
     registerAuraBorderWatcher()
     scheduleBorderRetries()
