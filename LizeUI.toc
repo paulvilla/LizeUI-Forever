@@ -1,11 +1,11 @@
 ## Interface: 16001
 ## Title: LizeUI
-## Notes: LizeUI importa perfiles guardados de BetterBlizzFrames y BetterBlizzPlates.
+## Notes: LizeUI importa perfiles guardados de BetterBlizzFrames, BetterBlizzPlates y Details.
 ## Author: Local
 ## X-Curse-Project-ID: 1710996
-## Version: 1.1.1
+## Version: 1.5.0
 ## Dependencies: BetterBlizzFrames
-## OptionalDeps: BetterBlizzPlates, LibSharedMedia-3.0, DialogueUI
+## OptionalDeps: BetterBlizzPlates, Details, LibSharedMedia-3.0, DialogueUI, RXPGuides
 ## SavedVariables: LizeUIDB, LoadProfilesDB
 
 
@@ -16,4 +16,7 @@ Libs\LibSharedMedia-3.0\LibSharedMedia-3.0.lua
 media\sharedmedia.lua
 profiles\betterblizzframes.lua
 profiles\betterblizzplater.lua
+profiles\details.lua
+modules\navroute.lua
+modules\utilities.lua
 LizeUI.lua

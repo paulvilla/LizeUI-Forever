@@ -227,4 +227,8 @@ LSM:Register("statusbar","pHishTex29", [[Interface\AddOns\LizeUI\media\textures\
 LSM:Register("statusbar","pHishTex35", [[Interface\AddOns\LizeUI\media\textures\statusbar\pHishTex35.tga]])
 LSM:Register("statusbar","pHishTex5", [[Interface\AddOns\LizeUI\media\textures\statusbar\pHishTex5.tga]])
 
+-- Details: titulo de ventana de la skin "The War Within" (el perfil de Details usa titlebar_texture = "TWW Header")
+LSM:Register("statusbar","TWW Header", Media("textures\\details\\header.tga"))
+LSM:Register("statusbar","TheWarWithinHeader", Media("textures\\details\\header.tga"))
+
 LSM.Register = sharedMediaRegister
