@@ -64,7 +64,7 @@ local function setting(key)
 end
 
 local function printMessage(message)
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ccffLizeUI|r: " .. message)
+    DEFAULT_CHAT_FRAME:AddMessage(ns.BrandText(true, 12) .. ": " .. message)
 end
 
 -- En Forever algunos valores pueden ser "secretos" (no accesibles desde addons)
@@ -673,7 +673,9 @@ end)
 -- gana: precio de subasta * unidades del stack - deposito (1 de plata).
 -- Para objetos no apilables el stack es siempre 1.
 -- ---------------------------------------------------------------------------
-local AUCTION_DEPOSIT = 100 -- 1 de plata, en cobre
+-- Comision de la casa de subastas de faccion: 5 % del precio de venta.
+-- (El deposito no se descuenta: se devuelve al venderse el objeto.)
+local AUCTION_CUT = 0.05
 local auctionHooked = false
 local auctionContext -- { link, count } del objeto que Auctionator esta pintando
 
@@ -718,19 +720,21 @@ local function addAuctionNetLine(tooltip, auctionPrice, _, cannotAuction)
     local count = 1
     if (tonumber(itemMaxStack(context.link)) or 1) > 1 then
         count = math.max(1, tonumber(context.count) or 1)
+        -- Pestana de venta de Auctionator: el tooltip se pinta solo con el enlace
+        -- (sin cantidad); la cantidad mostrada esta en el boton que tiene el raton.
+        if count <= 1 and tooltip.GetOwner then
+            local owner = tooltip:GetOwner()
+            local info = owner and owner.itemInfo
+            local ownerCount = info and tonumber(info.itemCount)
+            if ownerCount and ownerCount > 1 then count = ownerCount end
+        end
     end
 
-    local net = math.floor(unitPrice * count) - AUCTION_DEPOSIT
+    -- Lo que se cobra al venderse: precio total menos la comision
+    local net = math.floor(unitPrice * count * (1 - AUCTION_CUT))
     local label = "  " .. L.AUCTION_NET
     if count > 1 then label = label .. " |cff7fbfffx" .. count .. "|r" end
-    if net > 0 then
-        tooltip:AddDoubleLine(label, auctionMoneyString(net), 0.6, 0.6, 0.6, 0.5, 1, 0.5)
-    else
-        -- Dinero perdido (en rojo, con signo menos)
-        local lost = auctionMoneyString(-net)
-        if net < 0 then lost = "-" .. lost end
-        tooltip:AddDoubleLine(label, lost, 0.6, 0.6, 0.6, 1, 0.35, 0.35)
-    end
+    tooltip:AddDoubleLine(label, auctionMoneyString(net), 0.6, 0.6, 0.6, 0.5, 1, 0.5)
 
     -- Letra pequena para no ensanchar el tooltip
     local name = tooltip.GetName and tooltip:GetName()

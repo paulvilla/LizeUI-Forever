@@ -72,7 +72,7 @@ local lfgDungeonsLookup = {
 }
 
 local function printMessage(message)
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ccffLizeUI|r: " .. message)
+    DEFAULT_CHAT_FRAME:AddMessage(ns.BrandText(true, 12) .. ": " .. message)
 end
 
 local function importProfile(addonTableName, importFunction, profile, label)
@@ -389,7 +389,7 @@ local function formatChangelogLines(lines)
         if line:sub(1, 2) == "# " then
             out[#out + 1] = "|cffffd200" .. line:sub(3) .. "|r"
         elseif line:sub(1, 2) == "- " then
-            out[#out + 1] = "|cff66ccff•|r " .. line:sub(3)
+            out[#out + 1] = "|cff" .. ns.ACCENT_HEX .. "•|r " .. line:sub(3)
         else
             out[#out + 1] = line
         end
@@ -437,7 +437,7 @@ local function createWhatsNewWindow()
 
     f.title = f.TitleContainer:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     f.title:SetPoint("LEFT", f.TitleContainer, "LEFT", 40, 0)
-    f.title:SetText(L.WHATSNEW_TITLE)
+    f.title:SetText(ns.BrandText() .. " - " .. L.WHATSNEW_TITLE)
 
     f.heading = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     f.heading:SetPoint("TOP", f, "TOP", 0, -58)
@@ -518,13 +518,13 @@ local function showWhatsNew(sinceVersion)
         local newer = sinceVersion and compareVersions(entry.version, sinceVersion) > 0
         local isCurrent = compareVersions(entry.version, current) == 0
         if (newer and compareVersions(entry.version, current) <= 0) or (not sinceVersion and isCurrent) then
-            parts[#parts + 1] = ("|cff33ccff%s|r\n|cffffffff%s|r\n\n%s"):format(
+            parts[#parts + 1] = ("|cff" .. ns.ACCENT_HEX .. "%s|r\n|cffffffff%s|r\n\n%s"):format(
                 L.FMT_CHANGELOG_META:format(entry.version, entry.date or ""), entry.title or "",
                 formatChangelogLines(entry.lines))
         end
     end
     if #parts == 0 then return false end
-    whatsNew.heading:SetText(L.FMT_WHATSNEW_HEADING:format(current))
+    whatsNew.heading:SetText(L.FMT_WHATSNEW_HEADING:format(ns.BrandText(), current))
     whatsNew.text:SetText(table.concat(parts, "\n\n\n"))
     whatsNew.hideCheck:SetChecked(database.hideChangelogPopup == true)
     whatsNew:Show()
@@ -536,27 +536,6 @@ end
 -- Ventana de bienvenida / importacion (/lui). Se abre sola la primera vez que
 -- cada PERSONAJE entra con LizeUI (LizeUICharDB es SavedVariablesPerCharacter).
 -- ---------------------------------------------------------------------------
--- Texto con degradado de color letra a letra (mismo estilo que ElvUI_LizeUI)
-local function gradientText(text, r1, g1, b1, r2, g2, b2)
-    local len = #text
-    if len <= 1 then
-        return ("|cff%02x%02x%02x%s|r"):format(r1, g1, b1, text)
-    end
-    local out = {}
-    for i = 1, len do
-        local ch = text:sub(i, i)
-        if ch == " " then
-            out[#out + 1] = ch
-        else
-            local t = (i - 1) / (len - 1)
-            out[#out + 1] = ("|cff%02x%02x%02x%s|r"):format(
-                math.floor(r1 + (r2 - r1) * t + 0.5),
-                math.floor(g1 + (g2 - g1) * t + 0.5),
-                math.floor(b1 + (b2 - b1) * t + 0.5), ch)
-        end
-    end
-    return table.concat(out)
-end
 
 local function getCharDB()
     if type(LizeUICharDB) ~= "table" then LizeUICharDB = {} end
@@ -581,7 +560,7 @@ tinsert(UISpecialFrames, "LoadProfilesWindow") -- se cierra con Escape
 
 window.title = window.TitleContainer:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 window.title:SetPoint("LEFT", window.TitleContainer, "LEFT", 40, 0)
-window.title:SetText("LizeUI")
+window.title:SetText(ns.BrandText())
 window.CloseButton:SetScript("OnClick", function()
     window:Hide()
 end)
@@ -2351,7 +2330,7 @@ local function createSettings()
         local entry = changelog[index]
         for i, row in ipairs(versionRows) do
             local selected = i == index
-            row.bg:SetColorTexture(selected and 0.2 or 1, selected and 0.55 or 1, selected and 1 or 1,
+            row.bg:SetColorTexture(selected and 0 or 1, selected and 0.75 or 1, selected and 0.98 or 1,
                 selected and 0.35 or (i % 2 == 0 and 0.03 or 0.06))
             row.text:SetFontObject(selected and "GameFontHighlight" or "GameFontNormal")
         end
@@ -2404,14 +2383,14 @@ local function createSettings()
     -- Panel de soporte: cabecera con logo, donaciones y enlaces
     -- (mismos datos que la seccion Informacion de ElvUI_LizeUI)
     local supportPanel = createSettingsPanel(L.MENU_SUPPORT, "LizeUI")
-    local LIZEUI_GRADIENT = gradientText("LizeUI", 0, 192, 250, 130, 85, 255)
+    local LIZEUI_GRADIENT = ns.BrandText()
     local PATREON_URL = "https://www.patreon.com/cw/Lizerius"
     local CURSEFORGE_URL = "https://www.curseforge.com/wow/addons/lizeui-forever"
 
     local supportLogo = supportPanel:CreateTexture(nil, "ARTWORK")
     supportLogo:SetSize(64, 64)
     supportLogo:SetPoint("TOPLEFT", supportPanel, "TOPLEFT", 25, -20)
-    supportLogo:SetTexture(ICON_PATH .. "lizeui_portrait.tga")
+    supportLogo:SetTexture(ns.LOGO_FULL)
 
     local supportTitle = supportPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
     supportTitle:SetPoint("TOPLEFT", supportLogo, "TOPRIGHT", 14, -8)
@@ -2476,7 +2455,7 @@ local function createSettings()
     createLinkRow(L.LINK_CURSEFORGE, CURSEFORGE_URL, -325)
     createLinkRow(L.LINK_PATREON, PATREON_URL, -355)
 
-    local category = Settings.RegisterCanvasLayoutCategory(basePanel, "LizeUI", "LizeUI")
+    local category = Settings.RegisterCanvasLayoutCategory(basePanel, ns.BrandText(), "LizeUI")
     Settings.RegisterAddOnCategory(category)
     Settings.RegisterCanvasLayoutSubcategory(category, utilFrame, L.MENU_UTILITIES, L.MENU_UTILITIES)
     Settings.RegisterCanvasLayoutSubcategory(category, darkPanel, L.MENU_DARKMODE, L.MENU_DARKMODE)
@@ -2575,9 +2554,67 @@ local function openSettings()
     Settings.OpenToCategory(id)
 end
 
+-- ---------------------------------------------------------------------------
+-- Boton del minimapa (LibDBIcon) y entrada del Compartimento de addons
+-- ---------------------------------------------------------------------------
+local function addLauncherTooltip(tooltip)
+    tooltip:AddLine(ns.BrandText())
+    tooltip:AddLine(L.MINIMAP_LEFT, 1, 1, 1)
+    tooltip:AddLine(L.MINIMAP_RIGHT, 1, 1, 1)
+end
+
+local function onLauncherClick(button)
+    if button == "RightButton" then
+        showWindow()
+    else
+        openSettings()
+    end
+end
+
+local LDBIcon = LibStub and LibStub("LibDBIcon-1.0", true)
+
+local function initMinimapButton()
+    local LDB = LibStub and LibStub("LibDataBroker-1.1", true)
+    if not LDB or not LDBIcon then return end
+    database.minimap = database.minimap or { hide = false }
+    local launcher = LDB:NewDataObject("LizeUI", {
+        type = "launcher",
+        text = "LizeUI Forever",
+        icon = ns.LOGO_ROUND,
+        OnClick = function(_, button) onLauncherClick(button) end,
+        OnTooltipShow = function(tooltip)
+            addLauncherTooltip(tooltip)
+            tooltip:AddLine(L.MINIMAP_DRAG, 1, 1, 1)
+        end,
+    })
+    LDBIcon:Register("LizeUI", launcher, database.minimap)
+end
+
+local function toggleMinimapButton()
+    if not LDBIcon or not database.minimap then return end
+    database.minimap.hide = not database.minimap.hide
+    if database.minimap.hide then LDBIcon:Hide("LizeUI") else LDBIcon:Show("LizeUI") end
+    printMessage(L.FMT_MINIMAP_TOGGLE:format(database.minimap.hide and L.DISABLED or L.ENABLED))
+end
+
+-- Funciones globales que llama el Compartimento de addons (definidas en el .toc)
+function LizeUI_OnAddonCompartmentClick(_, button)
+    onLauncherClick(button)
+end
+
+function LizeUI_OnAddonCompartmentEnter(_, menuButton)
+    GameTooltip:SetOwner(menuButton, "ANCHOR_LEFT")
+    addLauncherTooltip(GameTooltip)
+    GameTooltip:Show()
+end
+
+function LizeUI_OnAddonCompartmentLeave()
+    GameTooltip:Hide()
+end
+
 local function printHelp()
     printMessage(L.HELP_TITLE)
-    for _, key in ipairs({ "HELP_LUI", "HELP_HELP", "HELP_INSTALL", "HELP_LOAD_EN", "HELP_LOAD_ES", "HELP_ROUTE" }) do
+    for _, key in ipairs({ "HELP_LUI", "HELP_HELP", "HELP_INSTALL", "HELP_LOAD_EN", "HELP_LOAD_ES", "HELP_ROUTE", "HELP_MINIMAP" }) do
         DEFAULT_CHAT_FRAME:AddMessage("   " .. L[key])
     end
 end
@@ -2609,6 +2646,8 @@ SlashCmdList.LIZEUI = function(msg)
         database.devMode = not database.devMode
         printMessage(L.FMT_DEV_MODE:format(database.devMode and L.ENABLED or L.DISABLED))
         updateDevModeVisibility()
+    elseif msg == "minimapa" or msg == "minimap" then
+        toggleMinimapButton()
     elseif msg == "ruta" then
         database.navRouteEnabled = not database.navRouteEnabled
         if NavRoute then NavRoute:Refresh() end
@@ -2797,12 +2836,13 @@ addon:SetScript("OnEvent", function(_, event, arg1)
     elseif event == "PLAYER_LOGIN" then
         initDatabase()
         createSettings()
+        initMinimapButton()
         updateDevModeVisibility()
         applyAllSettings()
         if NavRoute then NavRoute:Init(database) end
         if Utilities then Utilities:Init(database) end
         scheduleDetailsTitleBarRefresh()
-        printMessage(L.LOGIN_HINT:format(getAddonVersion()))
+        printMessage(L.LOGIN_HINT:format(ns.BrandText(), getAddonVersion()))
         -- Primera vez de ESTE personaje con LizeUI: abrir la ventana
         if not getCharDB().windowOpened then
             showWindow()

@@ -1,18 +1,24 @@
 ## Interface: 16001
-## Title: LizeUI
-## Notes: LizeUI importa perfiles guardados de BetterBlizzFrames, BetterBlizzPlates y Details.
+## Title: Lize|cff00c0faU|r|cff0eb4fbI|r |cff2b9cfcF|r|cff3a90fco|r|cff4885fdr|r|cff5779fde|r|cff656dfev|r|cff7461fee|r|cff8255ffr|r
+## IconTexture: Interface\AddOns\LizeUI\media\textures\icons\lizeui_addonlist
+## Notes: LizeUI Forever importa perfiles guardados de BetterBlizzFrames, BetterBlizzPlates y Details.
 ## Author: Local
 ## X-Curse-Project-ID: 1710996
 ## Version: 2.0.0
 ## OptionalDeps: BetterBlizzFrames, BetterBlizzPlates, Details, LibSharedMedia-3.0, RXPGuides, Auctionator
 ## SavedVariables: LizeUIDB, LoadProfilesDB
 ## SavedVariablesPerCharacter: LizeUICharDB
+## AddonCompartmentFunc: LizeUI_OnAddonCompartmentClick
+## AddonCompartmentFuncOnEnter: LizeUI_OnAddonCompartmentEnter
+## AddonCompartmentFuncOnLeave: LizeUI_OnAddonCompartmentLeave
 
 
 
 Libs\LibStub\LibStub.lua
 Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
 Libs\LibSharedMedia-3.0\LibSharedMedia-3.0.lua
+Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
+Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
 languages\esES.lua
 languages\enUS.lua
 languages\locale.lua
