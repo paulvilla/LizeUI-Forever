@@ -3,6 +3,7 @@ local _, ns = ...
 local addon = CreateFrame("Frame")
 local NavRoute = ns and ns.NavRoute
 local Utilities = ns and ns.Utilities
+local L = ns.L
 
 local function initDatabase()
     if type(LizeUIDB) ~= "table" then
@@ -13,12 +14,9 @@ local function initDatabase()
         end
     end
     LoadProfilesDB = LizeUIDB
-    if LizeUIDB.modifyDialogueUICameraOffset == nil then
-        LizeUIDB.modifyDialogueUICameraOffset = false
-    end
-    if LizeUIDB.dialogueUICameraOffset == nil then
-        LizeUIDB.dialogueUICameraOffset = 0
-    end
+    -- Opciones de DialogueUI eliminadas
+    LizeUIDB.modifyDialogueUICameraOffset = nil
+    LizeUIDB.dialogueUICameraOffset = nil
     if LizeUIDB.eliminarBotonIssueReport == nil then
         LizeUIDB.eliminarBotonIssueReport = true
     end
@@ -27,6 +25,15 @@ local function initDatabase()
     end
     if LizeUIDB.devMode == nil then
         LizeUIDB.devMode = false
+    end
+    LizeUIDB.chatGuildLoginSound = nil
+    LizeUIDB.chatGuildLoginGameSound = nil
+    LizeUIDB.chatGuildLoginSoundName = nil
+    -- 2.0.0: el precio neto de subasta pasa a estar activo por defecto. Se
+    -- activa una sola vez (tambien a quien ya lo tenia guardado como apagado).
+    if not LizeUIDB.tipAuctionNetDefaultApplied then
+        LizeUIDB.tipAuctionNet = true
+        LizeUIDB.tipAuctionNetDefaultApplied = true
     end
     for _, module in ipairs({ NavRoute, Utilities }) do
         if module and module.defaults then
@@ -70,13 +77,13 @@ end
 
 local function importProfile(addonTableName, importFunction, profile, label)
     if not profile then
-        printMessage("No se encontro el perfil de " .. label .. ".")
+        printMessage(L.FMT_PROFILE_NOT_FOUND:format(label))
         return
     end
 
     local addonTable = _G[addonTableName]
     if not addonTable or type(addonTable.OldImportProfile) ~= "function" then
-        printMessage(label .. " no esta cargado o no expone su importador.")
+        printMessage(L.FMT_NO_IMPORTER:format(label))
         return
     end
 
@@ -86,7 +93,7 @@ local function importProfile(addonTableName, importFunction, profile, label)
             return false, importError
         end
         if type(profileData) ~= "table" then
-            return false, "el perfil no contiene una configuracion valida"
+            return false, L.NO_VALID_CONFIG
         end
 
         local databaseName = addonTableName == "BBP" and "BetterBlizzPlatesDB" or "BetterBlizzFramesDB"
@@ -101,11 +108,11 @@ local function importProfile(addonTableName, importFunction, profile, label)
         return true
     end)
     if not success then
-        printMessage("Error al importar " .. label .. ": " .. tostring(imported))
+        printMessage(L.FMT_IMPORT_ERROR:format(label, tostring(imported)))
     elseif imported == false then
-        printMessage("Error al importar " .. label .. ": " .. tostring(errorMessage or "cadena no valida"))
+        printMessage(L.FMT_IMPORT_ERROR:format(label, tostring(errorMessage or L.INVALID_STRING)))
     else
-        printMessage("Perfil de " .. label .. " importado correctamente.")
+        printMessage(L.FMT_IMPORT_OK:format(label))
     end
 end
 
@@ -114,41 +121,463 @@ local detailsProfileName = "LizeUI"
 local function importDetailsProfile()
     local profile = LoadProfilesDetails
     if not profile then
-        printMessage("No se encontro el perfil de Details.")
+        printMessage(L.FMT_PROFILE_NOT_FOUND:format("Details"))
         return
     end
 
     local details = _G.Details or _G._detalhes
     if not details or type(details.ImportProfile) ~= "function" then
-        printMessage("Details no esta cargado o no expone su importador.")
+        printMessage(L.FMT_NO_IMPORTER:format("Details"))
         return
     end
 
     -- ImportProfile(cadena, nombre, importarAutoRun, desdePrompt, sobrescribir)
     local success, result = pcall(details.ImportProfile, details, profile, detailsProfileName, false, false, true)
     if not success then
-        printMessage("Error al importar Details: " .. tostring(result))
+        printMessage(L.FMT_IMPORT_ERROR:format("Details", tostring(result)))
     elseif not result then
-        printMessage("Error al importar Details: cadena no valida")
+        printMessage(L.FMT_IMPORT_ERROR:format("Details", L.INVALID_STRING))
     else
-        printMessage("Perfil de Details (" .. detailsProfileName .. ") importado correctamente.")
+        printMessage(L.FMT_IMPORT_OK:format("Details (" .. detailsProfileName .. ")"))
     end
 end
 
+-- ---------------------------------------------------------------------------
+-- Estado de addons (compartido por la ventana de bienvenida y el panel principal)
+-- ---------------------------------------------------------------------------
+local ICON_PATH = [[Interface\AddOns\LizeUI\media\textures\icons\]]
+local STATUS_INFO = {
+    ok       = { icon = ICON_PATH .. "ok.tga",        textKey = "STATUS_OK" },
+    reload   = { icon = ICON_PATH .. "no-active.tga", textKey = "STATUS_RELOAD" },
+    inactive = { icon = ICON_PATH .. "no-active.tga", textKey = "STATUS_INACTIVE" },
+    missing  = { icon = ICON_PATH .. "error.tga",     textKey = "STATUS_MISSING" },
+    blocked  = { icon = ICON_PATH .. "no-active.tga", textKey = "FMT_STATUS_BLOCKED" },
+}
+
+local function getAddonInfoSafe(folder)
+    local getInfo = (C_AddOns and C_AddOns.GetAddOnInfo) or GetAddOnInfo
+    if type(getInfo) ~= "function" then return nil end
+    local ok, name, _, _, loadable, reason = pcall(getInfo, folder)
+    if not ok then return nil end
+    if type(name) == "table" then
+        local t = name
+        return t.name or t.Name or folder, t.loadable, t.reason
+    end
+    return name, loadable, reason
+end
+
+-- Addons activados durante esta sesion con el boton "Activar" (cargan tras /reload)
+local enabledThisSession = {}
+local pendingReload = false
+
+-- Estado de un addon para ESTE personaje:
+--   ok       = cargado
+--   reload   = activado en esta sesion, se cargara al recargar la interfaz
+--   blocked  = activado pero el juego no lo puede cargar (desactualizado, falta una dependencia...)
+--   inactive = instalado pero desactivado
+--   missing  = no instalado
+-- La API de activacion devuelve valores ambiguos cuando el addon esta activado en
+-- otros personajes, asi que un addon no cargado que no se ha activado en esta
+-- sesion se considera desactivado.
+local function getAddonStatus(folder)
+    if isAddonLoaded(folder) then return "ok" end
+    local name, loadable, reason = getAddonInfoSafe(folder)
+    if reason == "MISSING" or type(name) ~= "string" or name == "" then return "missing" end
+    if enabledThisSession[folder] then return "reload" end
+    if type(reason) == "string" and reason ~= "" and reason ~= "DISABLED" and not loadable then
+        return "blocked", reason
+    end
+    return "inactive"
+end
+
+-- Lista de addons (requeridos / opcionales) con icono, uso, estado y botones
+-- Activar / Descargar. La usan la ventana de bienvenida y el panel principal.
+local ADDON_LIST = {
+    { folder = "BetterBlizzFrames", label = "BetterBlizzFrames",
+      useKey = "USE_BBF",
+      url = "https://www.curseforge.com/wow/addons/better-blizz-frames" },
+    { folder = "BetterBlizzPlates", label = "BetterBlizzPlates",
+      useKey = "USE_BBP",
+      url = "https://www.curseforge.com/wow/addons/better-blizz-plates" },
+    { folder = "Auctionator", label = "Auctionator",
+      useKey = "USE_AUCTIONATOR",
+      url = "https://www.curseforge.com/wow/addons/auctionator" },
+    { folder = "Details", label = "Details!",
+      useKey = "USE_DETAILS",
+      url = "https://www.curseforge.com/wow/addons/details" },
+    { folder = "RXPGuides", label = "RXPGuides",
+      useKey = "USE_RXP",
+      url = "https://github.com/RestedXP/RXPGuides" },
+}
+
+StaticPopupDialogs["LIZEUI_COPY_URL"] = {
+    text = "%s",
+    button1 = CLOSE or "Close",
+    hasEditBox = true,
+    editBoxWidth = 320,
+    OnShow = function(self, data)
+        local editBox = self.editBox or self.EditBox
+        if editBox then
+            editBox:SetText(data or "")
+            editBox:HighlightText()
+            editBox:SetFocus()
+        end
+    end,
+    EditBoxOnEnterPressed = function(self) self:GetParent():Hide() end,
+    EditBoxOnEscapePressed = function(self) self:GetParent():Hide() end,
+    EditBoxOnTextChanged = function(self, data)
+        if data and self:GetText() ~= data then
+            self:SetText(data)
+            self:HighlightText()
+        end
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+StaticPopupDialogs["LIZEUI_RELOAD_UI"] = {
+    text = "",
+    button1 = OKAY or "OK",
+    button2 = CANCEL or "Cancel",
+    OnAccept = function() ReloadUI() end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+local addonStatusLists = {}
+
+local function showReloadReminder()
+    if not pendingReload then return end
+    pendingReload = false
+    StaticPopupDialogs["LIZEUI_RELOAD_UI"].text = L.POPUP_RELOAD
+    StaticPopupDialogs["LIZEUI_RELOAD_UI"].button1 = L.RELOAD_UI
+    StaticPopupDialogs["LIZEUI_RELOAD_UI"].button2 = L.LATER
+    StaticPopup_Show("LIZEUI_RELOAD_UI")
+end
+
+-- parent: frame donde se dibuja; topY: posicion vertical de la primera cabecera;
+-- inset: margen izquierdo y derecho. Devuelve { Update = fn, bottomY = numero }.
+local function createAddonStatusList(parent, topY, inset)
+    local list = {}
+    local ROW_HEIGHT = 26
+    local rows = {}
+    local lastSection
+    local rowIndex = 0
+    local sectionOffset = 0
+
+    local summary = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    summary:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -(inset + 5), topY)
+
+    for _, entry in ipairs(ADDON_LIST) do
+        local section = entry.required and L.SECTION_REQUIRED or L.SECTION_OPTIONAL
+        if section ~= lastSection then
+            local header = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            header:SetPoint("TOPLEFT", parent, "TOPLEFT", inset, topY - rowIndex * ROW_HEIGHT - sectionOffset)
+            header:SetText(section)
+            sectionOffset = sectionOffset + 16
+            lastSection = section
+        end
+        local y = topY - rowIndex * ROW_HEIGHT - sectionOffset
+        rowIndex = rowIndex + 1
+
+        local row = CreateFrame("Frame", nil, parent)
+        row:SetPoint("TOPLEFT", parent, "TOPLEFT", inset, y)
+        row:SetPoint("RIGHT", parent, "RIGHT", -inset, 0)
+        row:SetHeight(ROW_HEIGHT - 2)
+
+        local bg = row:CreateTexture(nil, "BACKGROUND")
+        bg:SetAllPoints()
+        bg:SetColorTexture(1, 1, 1, rowIndex % 2 == 0 and 0.03 or 0.06)
+
+        row.icon = row:CreateTexture(nil, "ARTWORK")
+        row.icon:SetSize(16, 16)
+        row.icon:SetPoint("LEFT", row, "LEFT", 6, 0)
+
+        row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        row.name:SetPoint("LEFT", row.icon, "RIGHT", 8, 0)
+        row.name:SetText(entry.label)
+
+        row.use = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        row.use:SetPoint("LEFT", row, "LEFT", 175, 0)
+        row.use:SetText(L[entry.useKey])
+
+        row.status = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        row.status:SetPoint("LEFT", row, "LEFT", 320, 0)
+
+        row.link = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+        row.link:SetSize(76, 20)
+        row.link:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+        row.link:SetText(L.BTN_DOWNLOAD)
+        row.link:SetScript("OnClick", function()
+            StaticPopupDialogs["LIZEUI_COPY_URL"].text = L.POPUP_COPY_URL
+            StaticPopupDialogs["LIZEUI_COPY_URL"].button1 = L.CLOSE
+            StaticPopup_Show("LIZEUI_COPY_URL", entry.label, nil, entry.url)
+        end)
+
+        row.enable = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+        row.enable:SetSize(64, 20)
+        row.enable:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+        row.enable:SetText(L.BTN_ENABLE)
+        row.enable:SetScript("OnClick", function()
+            -- Se activa para este personaje (el cliente identifica al personaje por su
+            -- GUID) y se guarda; el aviso de recargar sale al cerrar la ventana
+            local enableAddOn = (C_AddOns and C_AddOns.EnableAddOn) or EnableAddOn
+            if not enableAddOn then return end
+            local ok = pcall(enableAddOn, entry.folder, UnitGUID("player"))
+            if not ok then
+                ok = pcall(enableAddOn, entry.folder, UnitName("player"))
+            end
+            if not ok then return end
+            local saveAddOns = (C_AddOns and C_AddOns.SaveAddOns) or SaveAddOns
+            if saveAddOns then pcall(saveAddOns) end
+            enabledThisSession[entry.folder] = true
+            pendingReload = true
+            for _, other in ipairs(addonStatusLists) do other.Update() end
+        end)
+
+        row.entry = entry
+        rows[#rows + 1] = row
+    end
+
+    list.bottomY = topY - rowIndex * ROW_HEIGHT - sectionOffset
+
+    local reloadButton = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+    reloadButton:SetSize(120, 20)
+    reloadButton:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -(inset + 4), list.bottomY - 4)
+    reloadButton:SetText(L.RELOAD_UI)
+    reloadButton:SetScript("OnClick", function() ReloadUI() end)
+
+    list.Update = function()
+        local loaded, needReload, missingRequired = 0, false, false
+        for _, row in ipairs(rows) do
+            local status, reason = getAddonStatus(row.entry.folder)
+            local info = STATUS_INFO[status]
+            row.icon:SetTexture(info.icon)
+            if status == "blocked" then
+                row.status:SetText(L.FMT_STATUS_BLOCKED:format(_G["ADDON_" .. reason] or reason))
+            else
+                row.status:SetText(L[info.textKey])
+            end
+            if status == "inactive" then row.enable:Show() else row.enable:Hide() end
+            if status == "missing" then row.link:Show() else row.link:Hide() end
+            if status == "ok" then loaded = loaded + 1 end
+            if status == "reload" then needReload = true end
+            if row.entry.required and status ~= "ok" then missingRequired = true end
+        end
+        summary:SetText((missingRequired and "|cffff5555" or "|cff55ff55") .. L.FMT_LOADED_COUNT:format(loaded, #rows) .. "|r")
+        if needReload then reloadButton:Show() else reloadButton:Hide() end
+    end
+
+    addonStatusLists[#addonStatusLists + 1] = list
+    return list
+end
+
+-- ---------------------------------------------------------------------------
+-- Registro de cambios (languages/changelog) y ventana de novedades
+-- ---------------------------------------------------------------------------
+local function getChangelog()
+    return (ns.Changelogs and (ns.Changelogs[ns.GetLanguage()] or ns.Changelogs.es)) or {}
+end
+
+local function formatChangelogLines(lines)
+    local out = {}
+    for _, line in ipairs(lines or {}) do
+        if line:sub(1, 2) == "# " then
+            out[#out + 1] = "|cffffd200" .. line:sub(3) .. "|r"
+        elseif line:sub(1, 2) == "- " then
+            out[#out + 1] = "|cff66ccff•|r " .. line:sub(3)
+        else
+            out[#out + 1] = line
+        end
+    end
+    return table.concat(out, "\n")
+end
+
+-- Compara versiones "x.y.z" por partes numericas: -1 si a < b, 0 si iguales, 1 si a > b
+local function compareVersions(a, b)
+    local pa, pb = {}, {}
+    for n in tostring(a or ""):gmatch("%d+") do pa[#pa + 1] = tonumber(n) end
+    for n in tostring(b or ""):gmatch("%d+") do pb[#pb + 1] = tonumber(n) end
+    for i = 1, math.max(#pa, #pb) do
+        local x, y = pa[i] or 0, pb[i] or 0
+        if x ~= y then return x < y and -1 or 1 end
+    end
+    return 0
+end
+
+local function getAddonVersion()
+    local getMetadata = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
+    return getMetadata and getMetadata(addonName, "Version") or "0"
+end
+
+local whatsNew -- ventana; se crea la primera vez que hace falta
+local openChangesPanel -- se asigna al crear el menu de Ajustes
+
+local function createWhatsNewWindow()
+    local f = CreateFrame("Frame", "LizeUIWhatsNewWindow", UIParent, "PortraitFrameTemplate")
+    f:SetSize(620, 470)
+    f:SetPoint("CENTER")
+    f:SetFrameStrata("HIGH")
+    f:SetTitleOffsets(0, 0)
+    f:SetBorder("HeldBagLayout")
+    f:SetPortraitTextureSizeAndOffset(38, -5, 0)
+    f:SetPortraitTextureRaw(ICON_PATH .. "lizeui_portrait.tga")
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", f.StartMoving)
+    f:SetScript("OnDragStop", f.StopMovingOrSizing)
+    f:Hide()
+    tinsert(UISpecialFrames, "LizeUIWhatsNewWindow")
+    f.CloseButton:SetScript("OnClick", function() f:Hide() end)
+
+    f.title = f.TitleContainer:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    f.title:SetPoint("LEFT", f.TitleContainer, "LEFT", 40, 0)
+    f.title:SetText(L.WHATSNEW_TITLE)
+
+    f.heading = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    f.heading:SetPoint("TOP", f, "TOP", 0, -58)
+    f.heading:SetText(L.WHATSNEW_HEADING)
+
+    local line = f:CreateTexture(nil, "ARTWORK")
+    line:SetColorTexture(0.5, 0.5, 0.5, 0.6)
+    line:SetHeight(1)
+    line:SetPoint("TOPLEFT", f, "TOPLEFT", 25, -82)
+    line:SetPoint("TOPRIGHT", f, "TOPRIGHT", -25, -82)
+
+    local scrollOk, scroll = pcall(CreateFrame, "ScrollFrame", nil, f, "ScrollFrameTemplate")
+    if not scrollOk or not scroll then
+        scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
+    end
+    scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 28, -92)
+    scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -32, 95)
+    local content = CreateFrame("Frame", nil, scroll)
+    content:SetSize(540, 300)
+    scroll:SetScrollChild(content)
+    f.text = content:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    f.text:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
+    f.text:SetWidth(530)
+    f.text:SetJustifyH("LEFT")
+    f.text:SetJustifyV("TOP")
+    f.text:SetSpacing(3)
+    f.Resize = function()
+        local width = scroll:GetWidth()
+        if width and width > 0 then
+            content:SetWidth(width)
+            f.text:SetWidth(width - 10)
+        end
+        content:SetHeight(math.max(f.text:GetStringHeight() + 10, 10))
+        scroll:SetVerticalScroll(0)
+    end
+    scroll:SetScript("OnSizeChanged", f.Resize)
+
+    local bottomLine = f:CreateTexture(nil, "ARTWORK")
+    bottomLine:SetColorTexture(0.5, 0.5, 0.5, 0.6)
+    bottomLine:SetHeight(1)
+    bottomLine:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 25, 85)
+    bottomLine:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -25, 85)
+
+    -- Activable: no volver a mostrar esta ventana al actualizar
+    f.hideCheck = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
+    f.hideCheck:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 25, 50)
+    local hideLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    hideLabel:SetPoint("LEFT", f.hideCheck, "RIGHT", 6, 0)
+    hideLabel:SetText(L.WHATSNEW_DONT_SHOW)
+    f.hideCheck:SetScript("OnClick", function(self)
+        database.hideChangelogPopup = self:GetChecked() and true or false
+    end)
+
+    local closeButton = CreateFrame("Button", nil, f, "SharedButtonTemplate")
+    closeButton:SetSize(150, 36)
+    closeButton:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -25, 45)
+    closeButton:SetText(L.CLOSE)
+    closeButton:SetScript("OnClick", function() f:Hide() end)
+
+    local changesButton = CreateFrame("Button", nil, f, "SharedButtonTemplate")
+    changesButton:SetSize(150, 36)
+    changesButton:SetPoint("RIGHT", closeButton, "LEFT", -10, 0)
+    changesButton:SetText(L.WHATSNEW_ALL_CHANGES)
+    changesButton:SetScript("OnClick", function()
+        f:Hide()
+        if openChangesPanel then openChangesPanel() end
+    end)
+
+    return f
+end
+
+-- Muestra los cambios de las versiones posteriores a "sinceVersion" (o solo la actual)
+local function showWhatsNew(sinceVersion)
+    whatsNew = whatsNew or createWhatsNewWindow()
+    local current = getAddonVersion()
+    local parts = {}
+    for _, entry in ipairs(getChangelog()) do
+        local newer = sinceVersion and compareVersions(entry.version, sinceVersion) > 0
+        local isCurrent = compareVersions(entry.version, current) == 0
+        if (newer and compareVersions(entry.version, current) <= 0) or (not sinceVersion and isCurrent) then
+            parts[#parts + 1] = ("|cff33ccff%s|r\n|cffffffff%s|r\n\n%s"):format(
+                L.FMT_CHANGELOG_META:format(entry.version, entry.date or ""), entry.title or "",
+                formatChangelogLines(entry.lines))
+        end
+    end
+    if #parts == 0 then return false end
+    whatsNew.heading:SetText(L.FMT_WHATSNEW_HEADING:format(current))
+    whatsNew.text:SetText(table.concat(parts, "\n\n\n"))
+    whatsNew.hideCheck:SetChecked(database.hideChangelogPopup == true)
+    whatsNew:Show()
+    whatsNew.Resize()
+    return true
+end
+
+-- ---------------------------------------------------------------------------
+-- Ventana de bienvenida / importacion (/lui). Se abre sola la primera vez que
+-- cada PERSONAJE entra con LizeUI (LizeUICharDB es SavedVariablesPerCharacter).
+-- ---------------------------------------------------------------------------
+-- Texto con degradado de color letra a letra (mismo estilo que ElvUI_LizeUI)
+local function gradientText(text, r1, g1, b1, r2, g2, b2)
+    local len = #text
+    if len <= 1 then
+        return ("|cff%02x%02x%02x%s|r"):format(r1, g1, b1, text)
+    end
+    local out = {}
+    for i = 1, len do
+        local ch = text:sub(i, i)
+        if ch == " " then
+            out[#out + 1] = ch
+        else
+            local t = (i - 1) / (len - 1)
+            out[#out + 1] = ("|cff%02x%02x%02x%s|r"):format(
+                math.floor(r1 + (r2 - r1) * t + 0.5),
+                math.floor(g1 + (g2 - g1) * t + 0.5),
+                math.floor(b1 + (b2 - b1) * t + 0.5), ch)
+        end
+    end
+    return table.concat(out)
+end
+
+local function getCharDB()
+    if type(LizeUICharDB) ~= "table" then LizeUICharDB = {} end
+    return LizeUICharDB
+end
+
 local window = CreateFrame("Frame", "LoadProfilesWindow", UIParent, "PortraitFrameTemplate")
-window:SetSize(500, 340)
+window:SetSize(660, 430)
 window:SetPoint("CENTER")
-window:SetFrameStrata("DIALOG")
+window:SetFrameStrata("HIGH") -- por debajo de los StaticPopup (Descargar / Recargar)
 window:SetTitleOffsets(0, 0)
 window:SetBorder("HeldBagLayout")
 window:SetPortraitTextureSizeAndOffset(38, -5, 0)
-window:SetPortraitTextureRaw(133642)
+window:SetPortraitTextureRaw(ICON_PATH .. "lizeui_portrait.tga")
 window:SetMovable(true)
 window:EnableMouse(true)
 window:RegisterForDrag("LeftButton")
 window:SetScript("OnDragStart", window.StartMoving)
 window:SetScript("OnDragStop", window.StopMovingOrSizing)
 window:Hide()
+tinsert(UISpecialFrames, "LoadProfilesWindow") -- se cierra con Escape
 
 window.title = window.TitleContainer:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 window.title:SetPoint("LEFT", window.TitleContainer, "LEFT", 40, 0)
@@ -156,34 +585,80 @@ window.title:SetText("LizeUI")
 window.CloseButton:SetScript("OnClick", function()
     window:Hide()
 end)
+-- Se marca como vista en cuanto se muestra (al cerrar, con /lui o sola)
+window:HookScript("OnShow", function()
+    getCharDB().windowOpened = true
+end)
 
-local description = window:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-description:SetPoint("TOP", window, "TOP", 0, -58)
-description:SetText("Selecciona una configuracion para importarla")
+-- El contenido se crea la primera vez que se muestra la ventana: asi los
+-- textos usan el idioma guardado (al cargar el archivo aun no se ha leido).
+local WINDOW_ADDONS, windowAddonList
+local windowBuilt = false
 
-local function createProfileButton(name, anchor, onClick)
-    local button = CreateFrame("Button", nil, window, "SharedButtonTemplate")
-    button:SetSize(214, 48)
-    button:SetPoint(unpack(anchor))
-    button:SetText(name)
-    button:SetScript("OnClick", onClick)
-    return button
+local function buildWindowContent()
+    if windowBuilt then return end
+    windowBuilt = true
+
+    local description = window:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    description:SetPoint("TOP", window, "TOP", 0, -58)
+    description:SetText(L.WINDOW_DESCRIPTION)
+
+    WINDOW_ADDONS = {
+        { folder = "BetterBlizzFrames", label = "BetterBlizzFrames", x = -160,
+          onClick = function() importProfile("BBF", "ImportProfile", LoadProfilesBetterBlizzFrames, "BetterBlizzFrames") end },
+        { folder = "BetterBlizzPlates", label = "BetterBlizzPlates", x = 0,
+          onClick = function() importProfile("BBP", "ImportProfile", LoadProfilesBetterBlizzPlater, "BetterBlizzPlates") end },
+        { folder = "Details", label = "Details", x = 160,
+          onClick = importDetailsProfile },
+    }
+
+    -- Misma lista de addons que en el panel principal
+    windowAddonList = createAddonStatusList(window, -88, 20)
+
+    local function createWindowButton(text, x, y, onClick)
+        local button = CreateFrame("Button", nil, window, "SharedButtonTemplate")
+        button:SetSize(150, 36)
+        button:SetPoint("BOTTOM", window, "BOTTOM", x, y)
+        button:SetText(text)
+        button:SetScript("OnClick", onClick)
+        return button
+    end
+
+    for _, entry in ipairs(WINDOW_ADDONS) do
+        entry.button = createWindowButton(entry.label, entry.x, 80, entry.onClick)
+
+        entry.button:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_TOP")
+            GameTooltip:SetText(entry.label, 1, 1, 1)
+            if self:IsEnabled() then
+                GameTooltip:AddLine(L.FMT_TIP_IMPORT:format(entry.label), nil, nil, nil, true)
+            else
+                GameTooltip:AddLine(L.TIP_IMPORT_DISABLED, 1, 0.35, 0.35, true)
+            end
+            GameTooltip:Show()
+        end)
+        entry.button:SetScript("OnLeave", GameTooltip_Hide)
+        entry.button:SetMotionScriptsWhileDisabled(true)
+    end
+
+    createWindowButton(L.BTN_RELOAD, 0, 30, function()
+        getCharDB().windowOpened = true
+        ReloadUI()
+    end)
 end
 
-createProfileButton("BetterBlizzFrames", { "BOTTOMLEFT", 26, 75 }, function()
-    importProfile("BBF", "ImportProfile", LoadProfilesBetterBlizzFrames, "BetterBlizzFrames")
-end)
-
-createProfileButton("BetterBlizzPlates", { "BOTTOMRIGHT", -26, 75 }, function()
-    importProfile("BBP", "ImportProfile", LoadProfilesBetterBlizzPlater, "BetterBlizzPlates")
-end)
-
-createProfileButton("Details", { "BOTTOM", 0, 130 }, importDetailsProfile)
-
-createProfileButton("Reload", { "BOTTOM", 0, 25 }, function()
-    database.windowOpened = true
-    ReloadUI()
-end)
+local function updateWindowStatus()
+    buildWindowContent()
+    windowAddonList.Update()
+    -- Los botones de importacion solo funcionan si su addon esta cargado
+    for _, entry in ipairs(WINDOW_ADDONS) do
+        local loaded = getAddonStatus(entry.folder) == "ok"
+        if loaded then entry.button:Enable() else entry.button:Disable() end
+        entry.button:SetAlpha(loaded and 1 or 0.5)
+    end
+end
+window:HookScript("OnShow", updateWindowStatus)
+window:HookScript("OnHide", function() C_Timer.After(0.1, showReloadReminder) end)
 
 local function createSettingsPanel(name, parent)
     local panel = CreateFrame("Frame")
@@ -361,12 +836,6 @@ local function createSettingsSlider(panel, name, minVal, maxVal, step, defaultVa
     return slider, valueDisplay
 end
 
-local function notifyDialogueUI()
-    if DialogueUIAPI and type(DialogueUIAPI.UpdateCameraShoulderOffset) == "function" then
-        DialogueUIAPI.UpdateCameraShoulderOffset()
-    end
-end
-
 local function updateIssueReportButton(hidden)
     local frames = {
         "PTR_IssueReporter",
@@ -423,6 +892,7 @@ local function getAuraBorderColor(isDebuff)
 end
 
 local function updateBuffDebuffBorders(enabled)
+    if enabled and not isAddonLoaded("BetterBlizzFrames") then enabled = false end
     -- Asegurar que BBF muestre/oculte los bordes de debuff
     if BetterBlizzFramesDB then
         local changed = false
@@ -586,6 +1056,7 @@ local function updateBuffDebuffBorders(enabled)
 end
 
 local function updateTargetAuraBorders(enabled)
+    if enabled and not isAddonLoaded("BetterBlizzFrames") then enabled = false end
     local function applyTargetBorderUnsafe(button, isDebuff)
         local icon = button.bbfIcon or button.Icon or button.icon
         local anchor = icon or button
@@ -942,10 +1413,11 @@ end
 local function applyDarkModeSettings(light)
     if not BetterBlizzFramesDB then return end
     -- El Dark Mode de BBF tambien dibuja marcos en buffs/debuffs (darkModeUiAura,
-    -- activo por defecto). Los marcos de auras los gestiona solo la opcion
-    -- "Marcos iconos buff / Debuff" de LizeUI, asi que se desactiva siempre.
+    -- activo por defecto). Si "Marcos iconos buff / Debuff" de LizeUI esta activo,
+    -- esos marcos ya los dibuja LizeUI: se desactiva la opcion de BBF para no
+    -- duplicarlos. Si los marcos de LizeUI estan apagados, decide el usuario.
     local auraBordersRemoved = false
-    if BetterBlizzFramesDB.darkModeUiAura ~= false then
+    if database.marcosIconosBuffDebuff and BetterBlizzFramesDB.darkModeUiAura ~= false then
         BetterBlizzFramesDB.darkModeUiAura = false
         auraBordersRemoved = true
     end
@@ -1014,30 +1486,29 @@ local function cancelDarkModeApply()
     end
 end
 
+local settingsCategory -- categoria "LizeUI" del menu de Ajustes (para /lui)
+
 local function createSettings()
     if not Settings or not Settings.RegisterCanvasLayoutCategory then
         return
     end
 
+    -- Panel principal: estado de addons (mas abajo) + importaciones
     local basePanel = createSettingsPanel("LizeUI")
-    createDivider(basePanel, "Edicion WOW Forever", -30)
-    local buffCheckbox = createSettingsCheckboxCustom(
-        basePanel,
-        "Marcos iconos buff / Debuff",
-        { "TOPLEFT", basePanel, "TOPLEFT", 35, -45 },
+
+    -- Panel DarkMode: edicion WoW Forever (marcos de auras y Dark Mode de BetterBlizzFrames)
+    local darkPanel = createSettingsPanel(L.MENU_DARKMODE, "LizeUI")
+    createDivider(darkPanel, L.DIV_WOW_FOREVER, -30)
+    local buffCheckbox, buffCheckboxLabel = createSettingsCheckboxCustom(
+        darkPanel,
+        L.OPT_AURA_BORDERS,
+        { "TOPLEFT", darkPanel, "TOPLEFT", 35, -45 },
         "marcosIconosBuffDebuff",
         function(isChecked)
             updateBuffDebuffBorders(isChecked)
             updateTargetAuraBorders(isChecked)
-        end
-    )
-    local issueReportCheckbox = createSettingsCheckboxCustom(
-        basePanel,
-        "Eliminar boton Issue Report",
-        { "TOPLEFT", basePanel, "TOPLEFT", 355, -45 },
-        "eliminarBotonIssueReport",
-        function(isChecked)
-            updateIssueReportButton(isChecked)
+            applyDarkModeSettings()
+            if darkPanel.UpdateSections then darkPanel.UpdateSections() end
         end
     )
 
@@ -1053,13 +1524,14 @@ local function createSettings()
                 darkModeSlider:SetAlpha(0.5)
             end
         end
+        if darkPanel.UpdateSections then darkPanel.UpdateSections() end
     end
 
-    local darkModeCheckbox = CreateFrame("CheckButton", nil, basePanel, "UICheckButtonTemplate")
-    darkModeCheckbox:SetPoint("TOPLEFT", basePanel, "TOPLEFT", 35, -80)
-    local darkModeCheckboxLabel = basePanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    local darkModeCheckbox = CreateFrame("CheckButton", nil, darkPanel, "UICheckButtonTemplate")
+    darkModeCheckbox:SetPoint("TOPLEFT", darkPanel, "TOPLEFT", 35, -80)
+    local darkModeCheckboxLabel = darkPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     darkModeCheckboxLabel:SetPoint("LEFT", darkModeCheckbox, "RIGHT", 8, 0)
-    darkModeCheckboxLabel:SetText("Activar Dark Mode")
+    darkModeCheckboxLabel:SetText(L.OPT_DARK_MODE)
     darkModeCheckbox:SetScript("OnClick", function(self)
         local isChecked = self:GetChecked() and true or false
         if BetterBlizzFramesDB then
@@ -1073,8 +1545,8 @@ local function createSettings()
         self:SetChecked(BetterBlizzFramesDB and BetterBlizzFramesDB.darkModeUi == true)
     end
 
-    darkModeSlider = CreateFrame("Slider", "LizeUIDarkModeIntensitySlider", basePanel, "OptionsSliderTemplate")
-    darkModeSlider:SetPoint("TOPLEFT", basePanel, "TOPLEFT", 360, -80)
+    darkModeSlider = CreateFrame("Slider", "LizeUIDarkModeIntensitySlider", darkPanel, "OptionsSliderTemplate")
+    darkModeSlider:SetPoint("TOPLEFT", darkPanel, "TOPLEFT", 360, -80)
     darkModeSlider:SetSize(180, 17)
     darkModeSlider:SetMinMaxValues(0, 1)
     darkModeSlider:SetValueStep(0.05)
@@ -1095,7 +1567,7 @@ local function createSettings()
     if darkModeSliderText then
         darkModeSliderText:SetText("")
     end
-    local darkModeSliderValueDisplay = basePanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    local darkModeSliderValueDisplay = darkPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     darkModeSliderValueDisplay:SetPoint("BOTTOM", darkModeSlider, "TOP", 0, 4)
     local darkModeSliderUpdating = false
     darkModeSlider.Refresh = function(self)
@@ -1103,11 +1575,11 @@ local function createSettings()
         darkModeSliderUpdating = true
         self:SetValue(currentVal)
         darkModeSliderUpdating = false
-        darkModeSliderValueDisplay:SetText(string.format("Intensidad: %.2f", currentVal))
+        darkModeSliderValueDisplay:SetText(L.FMT_DARK_INTENSITY:format(currentVal))
     end
     darkModeSlider:SetScript("OnValueChanged", function(self, value)
         value = math.floor(value * 100 + 0.5) / 100
-        darkModeSliderValueDisplay:SetText(string.format("Intensidad: %.2f", value))
+        darkModeSliderValueDisplay:SetText(L.FMT_DARK_INTENSITY:format(value))
         if not darkModeSliderUpdating then
             if BetterBlizzFramesDB then
                 BetterBlizzFramesDB.darkModeColor = value
@@ -1127,7 +1599,121 @@ local function createSettings()
     darkModeSlider:Refresh()
     updateDarkModeSliderState(BetterBlizzFramesDB and BetterBlizzFramesDB.darkModeUi == true)
 
-    infoInstanciaButton = createSettingsButton(basePanel, "Info Instancia", 214, { "TOP", basePanel, "TOP", 0, -455 }, function()
+    -- Secciones del Dark Mode: son las mismas opciones del desplegable
+    -- "Opciones de Dark Mode" de BetterBlizzFrames (se guardan en su base de datos)
+    createDivider(darkPanel, L.DIV_DARK_SECTIONS, -135)
+    local DARK_SECTIONS = {
+        { key = "darkModeUnitFrames",        label = L.DM_UNITFRAMES },
+        { key = "darkModeActionBars",        label = L.DM_ACTIONBARS },
+        { key = "darkModeCastbars",          label = L.DM_CASTBARS },
+        { key = "darkModeUiAura",            label = L.DM_AURAS, auras = true },
+        { key = "darkModeMinimap",           label = L.DM_MINIMAP },
+        { key = "darkModeGameTooltip",       label = L.DM_TOOLTIP },
+        { key = "darkModeEliteTexture",      label = L.DM_ELITE },
+        { key = "darkModeObjectiveFrame",    label = L.DM_OBJECTIVES },
+        { key = "darkModeNameplateResource", label = L.DM_NAMEPLATE_RESOURCE },
+    }
+    local darkSectionChecks = {}
+    for index, section in ipairs(DARK_SECTIONS) do
+        local column = (index - 1) % 2
+        local row = math.floor((index - 1) / 2)
+        local check = CreateFrame("CheckButton", nil, darkPanel, "UICheckButtonTemplate")
+        check:SetPoint("TOPLEFT", darkPanel, "TOPLEFT", 35 + column * 320, -150 - row * 30)
+        local label = darkPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        label:SetPoint("LEFT", check, "RIGHT", 8, 0)
+        label:SetText(section.label)
+        check.label = label
+        check.section = section
+        check:SetScript("OnClick", function(self)
+            if not BetterBlizzFramesDB then return end
+            BetterBlizzFramesDB[section.key] = self:GetChecked() and true or false
+            cancelDarkModeApply()
+            applyDarkModeSettings()
+            if section.auras and BBF and BBF.RefreshAllAuraFrames then
+                BBF.RefreshAllAuraFrames()
+            end
+        end)
+        if section.auras then
+            check:SetMotionScriptsWhileDisabled(true)
+            check:SetScript("OnEnter", function(self)
+                if self:IsEnabled() then return end
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetText(section.label, 1, 1, 1)
+                GameTooltip:AddLine(L.DM_AURAS_LOCKED, nil, nil, nil, true)
+                GameTooltip:Show()
+            end)
+            check:SetScript("OnLeave", GameTooltip_Hide)
+        end
+        darkSectionChecks[#darkSectionChecks + 1] = check
+    end
+
+    darkPanel.UpdateSections = function()
+        local db = BetterBlizzFramesDB
+        local darkOn = db and db.darkModeUi == true
+        for _, check in ipairs(darkSectionChecks) do
+            check:SetChecked(db and db[check.section.key] and true or false)
+            local enabled = darkOn
+            if check.section.auras and database.marcosIconosBuffDebuff then
+                enabled = false -- los marcos de auras los dibuja LizeUI
+            end
+            if enabled then check:Enable() else check:Disable() end
+            check:SetAlpha(enabled and 1 or 0.5)
+            check.label:SetAlpha(enabled and 1 or 0.5)
+        end
+    end
+
+    -- Sin BetterBlizzFrames: todo bloqueado y un aviso en el centro del panel
+    local darkMissingFrame = CreateFrame("Frame", nil, darkPanel)
+    darkMissingFrame:SetPoint("LEFT", darkPanel, "LEFT", 20, 0)
+    darkMissingFrame:SetPoint("RIGHT", darkPanel, "RIGHT", -20, 0)
+    darkMissingFrame:SetPoint("TOP", darkPanel, "TOP", 0, -150)
+    darkMissingFrame:SetHeight(44)
+    darkMissingFrame:SetFrameLevel(darkPanel:GetFrameLevel() + 20)
+    local darkMissingBg = darkMissingFrame:CreateTexture(nil, "BACKGROUND")
+    darkMissingBg:SetAllPoints()
+    darkMissingBg:SetColorTexture(0, 0, 0, 0.75)
+    local darkMissingText = darkMissingFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    darkMissingText:SetPoint("CENTER")
+    darkMissingText:SetText(L.NAV_ADDON_MISSING)
+    darkMissingFrame:Hide()
+
+    local function setDarkWidget(widget, label, enabled)
+        if not widget then return end
+        if enabled then widget:Enable() else widget:Disable() end
+        widget:SetAlpha(enabled and 1 or 0.3)
+        if label then label:SetAlpha(enabled and 1 or 0.3) end
+    end
+
+    darkPanel.OnRefresh = function()
+        if buffCheckbox and buffCheckbox.Refresh then
+            buffCheckbox:Refresh()
+        end
+        if darkModeCheckbox and darkModeCheckbox.Refresh then
+            darkModeCheckbox:Refresh()
+        end
+        if darkModeSlider and darkModeSlider.Refresh then
+            darkModeSlider:Refresh()
+        end
+        updateDarkModeSliderState(BetterBlizzFramesDB and BetterBlizzFramesDB.darkModeUi == true)
+
+        local hasBBF = isAddonLoaded("BetterBlizzFrames") and BetterBlizzFramesDB ~= nil
+        if hasBBF then
+            darkMissingFrame:Hide()
+            setDarkWidget(buffCheckbox, buffCheckboxLabel, true)
+            setDarkWidget(darkModeCheckbox, darkModeCheckboxLabel, true)
+        else
+            darkMissingFrame:Show()
+            setDarkWidget(buffCheckbox, buffCheckboxLabel, false)
+            setDarkWidget(darkModeCheckbox, darkModeCheckboxLabel, false)
+            setDarkWidget(darkModeSlider, darkModeSliderValueDisplay, false)
+            for _, check in ipairs(darkSectionChecks) do
+                setDarkWidget(check, check.label, false)
+            end
+        end
+    end
+    darkPanel:SetScript("OnShow", darkPanel.OnRefresh)
+
+    infoInstanciaButton = createSettingsButton(basePanel, "Info Instancia", 214, { "TOP", basePanel, "TOP", 0, -440 }, function()
         -- 1. Obtener datos de instancia y mapa
         local name, instanceType, difficultyID, difficultyName, maxPlayers, dynamicDifficulty, isDynamic, instanceMapID, lfgDungeonID = GetInstanceInfo()
         local mapID = instanceMapID
@@ -1183,91 +1769,33 @@ local function createSettings()
         printMessage("WHERE ld.Name_Lang LIKE '%" .. (nameLang or "") .. "%';")
     end)
 
-    createDivider(basePanel, "DialogueUI", -145)
+    createDivider(basePanel, L.DIV_IMPORTS, -275)
 
-    local dialogueUISlider, dialogueUISliderValDisplay
+    local importText = basePanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    importText:SetPoint("TOPLEFT", basePanel, "TOPLEFT", 25, -290)
+    importText:SetPoint("RIGHT", basePanel, "RIGHT", -25, 0)
+    importText:SetJustifyH("LEFT")
+    importText:SetJustifyV("TOP")
+    importText:SetText(L.IMPORT_TEXT)
 
-    local function updateSliderState(enabled)
-        if dialogueUISlider then
-            if enabled then
-                dialogueUISlider:Enable()
-                dialogueUISlider:SetAlpha(1.0)
-            else
-                dialogueUISlider:Disable()
-                dialogueUISlider:SetAlpha(0.5)
-            end
-        end
+    local function createImportButton(text, xOffset, yOffset, onClick)
+        local button = CreateFrame("Button", nil, basePanel, "SharedButtonTemplate")
+        button:SetSize(150, 36)
+        button:SetPoint("TOP", basePanel, "TOP", xOffset, yOffset)
+        button:SetText(text)
+        button:SetScript("OnClick", onClick)
+        return button
     end
-
-    local dialogueUICheckbox = createSettingsCheckboxCustom(
-        basePanel,
-        "Modificar Campo de vision lateral",
-        { "TOPLEFT", basePanel, "TOPLEFT", 35, -175 },
-        "modifyDialogueUICameraOffset",
-        function(isChecked)
-            updateSliderState(isChecked)
-            notifyDialogueUI()
-        end
-    )
-
-    dialogueUISlider, dialogueUISliderValDisplay = createSettingsSlider(
-        basePanel,
-        "LizeUIDialogueUICameraOffsetSlider",
-        -20,
-        20,
-        1,
-        0,
-        { "TOPLEFT", basePanel, "TOPLEFT", 360, -180 },
-        "dialogueUICameraOffset",
-        function(val)
-            notifyDialogueUI()
-        end
-    )
-
-    updateSliderState(database.modifyDialogueUICameraOffset == true)
-
-    basePanel.OnRefresh = function()
-        if buffCheckbox and buffCheckbox.Refresh then
-            buffCheckbox:Refresh()
-        end
-        if issueReportCheckbox and issueReportCheckbox.Refresh then
-            issueReportCheckbox:Refresh()
-        end
-        if darkModeCheckbox and darkModeCheckbox.Refresh then
-            darkModeCheckbox:Refresh()
-        end
-        if darkModeSlider and darkModeSlider.Refresh then
-            darkModeSlider:Refresh()
-        end
-        updateDarkModeSliderState(BetterBlizzFramesDB and BetterBlizzFramesDB.darkModeUi == true)
-        if dialogueUICheckbox and dialogueUICheckbox.Refresh then
-            dialogueUICheckbox:Refresh()
-        end
-        if dialogueUISlider and dialogueUISlider.Refresh then
-            dialogueUISlider:Refresh()
-        end
-        updateSliderState(database.modifyDialogueUICameraOffset == true)
-    end
-
-    createDivider(basePanel, "Importaciones", -225)
-
-    local description = basePanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    description:SetPoint("TOPLEFT", basePanel, "TOPLEFT", 20, -255)
-    description:SetWidth(640)
-    description:SetHeight(64)
-    description:SetJustifyH("LEFT")
-    description:SetJustifyV("TOP")
-    description:SetText("LizeUI usa los addons BetterBlizzPlates y BetterBlizzFrames para conseguir una apariencia mejorada, sin cambiar la esencia de WoW Forever.\n\nAquí tienes unos botones para importar directamente las configuraciones que hemos preconfigurado, para que el juego se vea notablemente mejor.")
-
-    createSettingsButton(basePanel, "BetterBlizzFrames", 214, { "TOP", basePanel, "TOP", -110, -340 }, function()
+    -- Fila de importaciones (centrada) y Reload debajo, en el centro
+    createImportButton("BetterBlizzFrames", -160, -330, function()
         importProfile("BBF", "ImportProfile", LoadProfilesBetterBlizzFrames, "BetterBlizzFrames")
     end)
-    createSettingsButton(basePanel, "BetterBlizzPlates", 214, { "TOP", basePanel, "TOP", 110, -340 }, function()
+    createImportButton("BetterBlizzPlates", 0, -330, function()
         importProfile("BBP", "ImportProfile", LoadProfilesBetterBlizzPlater, "BetterBlizzPlates")
     end)
-    createSettingsButton(basePanel, "Details", 214, { "TOP", basePanel, "TOP", -110, -400 }, importDetailsProfile)
-    createSettingsButton(basePanel, "Reload", 214, { "TOP", basePanel, "TOP", 110, -400 }, function()
-        database.windowOpened = true
+    createImportButton("Details", 160, -330, importDetailsProfile)
+    createImportButton(L.BTN_RELOAD, 0, -376, function()
+        getCharDB().windowOpened = true
         ReloadUI()
     end)
 
@@ -1276,15 +1804,15 @@ local function createSettings()
     end
 
     -- Panel de navegacion: ruta de RXPGuides en minimapa y mapa del mundo
-    local navPanel = createSettingsPanel("Navegacion RXP", "LizeUI")
+    local navPanel = createSettingsPanel(L.MENU_NAVIGATION, "LizeUI")
     local function refreshNavRoute()
         if NavRoute then NavRoute:Refresh() end
     end
-    createDivider(navPanel, "Ruta de navegacion (RXPGuides)", -30)
+    createDivider(navPanel, L.DIV_NAV_ROUTE, -30)
 
     local navControls = {}
-    local navEnabledCheckbox = createSettingsCheckboxCustom(
-        navPanel, "Activar ruta de navegacion",
+    local navEnabledCheckbox, navEnabledLabel = createSettingsCheckboxCustom(
+        navPanel, L.OPT_NAV_ENABLE,
         { "TOPLEFT", navPanel, "TOPLEFT", 35, -50 },
         "navRouteEnabled",
         function()
@@ -1292,16 +1820,17 @@ local function createSettings()
             refreshNavRoute()
         end
     )
+    navEnabledCheckbox.lizeLabel = navEnabledLabel
     local function addNavCheckbox(text, point, key)
         local checkbox, label = createSettingsCheckboxCustom(navPanel, text, point, key, refreshNavRoute)
         navControls[#navControls + 1] = { widget = checkbox, label = label }
         return checkbox
     end
-    local navArrowsCheckbox = addNavCheckbox("Flechas de direccion animadas", { "TOPLEFT", navPanel, "TOPLEFT", 355, -50 }, "navRouteArrows")
-    local navMinimapCheckbox = addNavCheckbox("Mostrar en el minimapa", { "TOPLEFT", navPanel, "TOPLEFT", 35, -85 }, "navRouteMinimap")
-    local navWorldMapCheckbox = addNavCheckbox("Mostrar en el mapa del mundo", { "TOPLEFT", navPanel, "TOPLEFT", 355, -85 }, "navRouteWorldMap")
+    local navArrowsCheckbox = addNavCheckbox(L.OPT_NAV_ARROWS, { "TOPLEFT", navPanel, "TOPLEFT", 355, -50 }, "navRouteArrows")
+    local navMinimapCheckbox = addNavCheckbox(L.OPT_NAV_MINIMAP, { "TOPLEFT", navPanel, "TOPLEFT", 35, -85 }, "navRouteMinimap")
+    local navWorldMapCheckbox = addNavCheckbox(L.OPT_NAV_WORLDMAP, { "TOPLEFT", navPanel, "TOPLEFT", 355, -85 }, "navRouteWorldMap")
 
-    createDivider(navPanel, "Apariencia", -135)
+    createDivider(navPanel, L.DIV_APPEARANCE, -135)
 
     local navDefaults = NavRoute and NavRoute.defaults or {}
     local function addNavSlider(name, minVal, maxVal, step, key, point, decimals, displayFormat)
@@ -1313,13 +1842,13 @@ local function createSettings()
         return slider
     end
     local navThicknessSlider = addNavSlider("LizeUINavRouteThicknessSlider", 1, 6, 0.5, "navRouteThickness",
-        { "TOPLEFT", navPanel, "TOPLEFT", 60, -180 }, 1, "Grosor de linea: %s")
+        { "TOPLEFT", navPanel, "TOPLEFT", 60, -180 }, 1, L.FMT_NAV_THICKNESS)
     local navAlphaSlider = addNavSlider("LizeUINavRouteAlphaSlider", 0.2, 1, 0.05, "navRouteAlpha",
-        { "TOPLEFT", navPanel, "TOPLEFT", 360, -180 }, 2, "Opacidad: %s")
+        { "TOPLEFT", navPanel, "TOPLEFT", 360, -180 }, 2, L.FMT_NAV_ALPHA)
     local navGraySlider = addNavSlider("LizeUINavRouteGraySlider", 0.3, 1, 0.05, "navRouteGray",
-        { "TOPLEFT", navPanel, "TOPLEFT", 60, -245 }, 2, "Tono de gris: %s")
+        { "TOPLEFT", navPanel, "TOPLEFT", 60, -245 }, 2, L.FMT_NAV_GRAY)
     local navFutureSlider = addNavSlider("LizeUINavRouteFutureSlider", 0, 5, 1, "navRouteFutureSteps",
-        { "TOPLEFT", navPanel, "TOPLEFT", 360, -245 }, 0, "Pasos siguientes en la ruta: %s")
+        { "TOPLEFT", navPanel, "TOPLEFT", 360, -245 }, 0, L.FMT_NAV_FUTURE)
 
     local navStatusText = navPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     navStatusText:SetPoint("TOPLEFT", navPanel, "TOPLEFT", 20, -300)
@@ -1330,27 +1859,52 @@ local function createSettings()
     local function updateNavStatus()
         local lines = {}
         if isAddonLoaded("RXPGuides") and NavRoute and NavRoute:IsAvailable() then
-            lines[#lines + 1] = "|cff7fff7fRXPGuides detectado.|r La ruta sigue el objetivo actual de la guia, sus waypoints y los pasos siguientes (los pasos siguientes se dibujan mas tenues)."
+            lines[#lines + 1] = L.NAV_STATUS_OK
         else
-            lines[#lines + 1] = "|cffff5555RXPGuides no esta cargado:|r la ruta de navegacion no se mostrara."
+            lines[#lines + 1] = L.NAV_STATUS_MISSING
         end
         if isAddonLoaded("RXP_Navigator") then
-            lines[#lines + 1] = "|cffffaa33RXP_Navigator esta activo.|r Recomendado desactivarlo: duplica las lineas y modifica los ajustes de la flecha de RXPGuides."
+            lines[#lines + 1] = L.NAV_STATUS_NAVIGATOR
         end
         navStatusText:SetText(table.concat(lines, "\n\n"))
     end
 
+    -- Sin RXPGuides: todo bloqueado y un aviso en el centro del panel
+    local navMissingFrame = CreateFrame("Frame", nil, navPanel)
+    navMissingFrame:SetPoint("LEFT", navPanel, "LEFT", 20, 0)
+    navMissingFrame:SetPoint("RIGHT", navPanel, "RIGHT", -20, 0)
+    navMissingFrame:SetPoint("TOP", navPanel, "TOP", 0, -150)
+    navMissingFrame:SetHeight(44)
+    navMissingFrame:SetFrameLevel(navPanel:GetFrameLevel() + 20)
+    local navMissingBg = navMissingFrame:CreateTexture(nil, "BACKGROUND")
+    navMissingBg:SetAllPoints()
+    navMissingBg:SetColorTexture(0, 0, 0, 0.75)
+    local navMissingText = navMissingFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    navMissingText:SetPoint("CENTER")
+    navMissingText:SetText(L.NAV_ADDON_MISSING)
+    navMissingFrame:Hide()
+
+    local navResetButton
+    local function navAddonAvailable()
+        return isAddonLoaded("RXPGuides") and NavRoute and NavRoute:IsAvailable() and true or false
+    end
+
+    local function setNavWidget(widget, label, enabled, dimAlpha)
+        if enabled then widget:Enable() else widget:Disable() end
+        widget:SetAlpha(enabled and 1 or dimAlpha)
+        if label then label:SetAlpha(enabled and 1 or dimAlpha) end
+    end
+
     navPanel.UpdateState = function()
-        local enabled = database.navRouteEnabled == true
+        local available = navAddonAvailable()
+        local enabled = available and database.navRouteEnabled == true
+        local dim = available and 0.5 or 0.3
+        setNavWidget(navEnabledCheckbox, navEnabledCheckbox.lizeLabel, available, dim)
         for _, control in ipairs(navControls) do
-            if enabled then
-                control.widget:Enable()
-            else
-                control.widget:Disable()
-            end
-            control.widget:SetAlpha(enabled and 1 or 0.5)
-            if control.label then control.label:SetAlpha(enabled and 1 or 0.5) end
+            setNavWidget(control.widget, control.label, enabled, dim)
         end
+        if navResetButton then setNavWidget(navResetButton, nil, available, dim) end
+        if available then navMissingFrame:Hide() else navMissingFrame:Show() end
     end
 
     local function refreshNavPanel()
@@ -1362,7 +1916,7 @@ local function createSettings()
         updateNavStatus()
     end
 
-    createSettingsButton(navPanel, "Restablecer valores", 214, { "TOP", navPanel, "TOP", 0, -380 }, function()
+    navResetButton = createSettingsButton(navPanel, L.BTN_RESET, 214, { "TOP", navPanel, "TOP", 0, -380 }, function()
         for key, value in pairs(navDefaults) do
             database[key] = value
         end
@@ -1375,7 +1929,20 @@ local function createSettings()
     refreshNavPanel()
 
     -- Panel de utilidades: tooltip mejorado y automatizaciones (estilo Leatrix Plus)
-    local utilPanel = createSettingsPanel("Utilidades", "LizeUI")
+    -- El contenido no cabe en el lienzo de Ajustes: va dentro de un ScrollFrame
+    local utilFrame = createSettingsPanel(L.MENU_UTILITIES, "LizeUI")
+    local scrollOk, utilScroll = pcall(CreateFrame, "ScrollFrame", nil, utilFrame, "ScrollFrameTemplate")
+    if not scrollOk or not utilScroll then
+        utilScroll = CreateFrame("ScrollFrame", nil, utilFrame, "UIPanelScrollFrameTemplate")
+    end
+    utilScroll:SetPoint("TOPLEFT", utilFrame, "TOPLEFT", 0, -2)
+    utilScroll:SetPoint("BOTTOMRIGHT", utilFrame, "BOTTOMRIGHT", -26, 2)
+    local utilPanel = CreateFrame("Frame", nil, utilScroll)
+    utilPanel:SetSize(640, 925)
+    utilScroll:SetScrollChild(utilPanel)
+    utilScroll:SetScript("OnSizeChanged", function(_, width)
+        if width and width > 0 then utilPanel:SetWidth(width) end
+    end)
     local utilDefaults = Utilities and Utilities.defaults or {}
     local utilRefreshers = {}
     local function refreshTooltipModule()
@@ -1420,26 +1987,155 @@ local function createSettings()
         return { widget = slider, label = valueDisplay }
     end
 
-    -- Seccion: Tooltip
-    createDivider(utilPanel, "Tooltip mejorado", -30)
-    local tipEnable = addUtilCheckbox("Activar tooltip mejorado", COL1, -45, "tipEnabled", refreshTooltipModule,
-        "Nombres en color de clase, nivel coloreado por dificultad, rango de hermandad, objetivo de la unidad, anclaje al cursor y escala.")
-    local tipHealth = addUtilCheckbox("Ocultar la barra de salud", COL2, -45, "tipNoHealthBar", refreshTooltipModule)
-    local tipRank = addUtilCheckbox("Rangos de tu hermandad", COL1, -75, "tipShowRank")
-    local tipOtherRank = addUtilCheckbox("Rangos de otras hermandades", COL2, -75, "tipShowOtherRank")
-    local tipTarget = addUtilCheckbox("Mostrar el objetivo de la unidad", COL1, -105, "tipShowTarget")
-    local tipFaction = addUtilCheckbox("Fondo segun faccion", COL2, -105, "tipBackFaction", nil,
-        "Tiñe el fondo de azul (amistoso) o rojo (faccion enemiga).")
-    local tipCombat = addUtilCheckbox("Ocultar en combate (unidades del mundo)", COL1, -135, "tipHideInCombat")
-    local tipShift = addUtilCheckbox("Mostrar con Shift en combate", COL2, -135, "tipHideShiftOverride")
+    -- Seccion: Chat mejorado
+    local LSM = LibStub and LibStub("LibSharedMedia-3.0", true)
+    local function createSoundPicker(key, x, y)
+        local dropdown = CreateFrame("DropdownButton", nil, utilPanel, "WowStyle1DropdownTemplate")
+        dropdown:SetPoint("TOPLEFT", utilPanel, "TOPLEFT", x, y)
+        dropdown:SetWidth(180)
+        -- Icono de escuchar a la derecha de cada sonido. Es solo una textura: el
+        -- clic lo recibe la linea del menu y, si el raton esta sobre el icono, se
+        -- reproduce el sonido sin seleccionarlo y sin cerrar el menu.
+        local playIcons = {}
+        local function attachPlayIcon(button, name)
+            local icon
+            if button.AttachTexture then
+                icon = button:AttachTexture()
+            else
+                icon = button.lizePlayIcon or button:CreateTexture(nil, "OVERLAY")
+                button.lizePlayIcon = icon
+            end
+            icon:SetSize(16, 16)
+            icon:ClearAllPoints()
+            icon:SetPoint("RIGHT", button, "RIGHT", -2, 0)
+            icon:SetTexture("Interface\\Common\\VoiceChat-Speaker")
+            icon:Show()
+            playIcons[name] = icon
+        end
+        local function isOverPlayIcon(name)
+            local icon = playIcons[name]
+            return icon and icon:IsVisible() and icon:IsMouseOver()
+        end
+        local keepOpen = MenuResponse and MenuResponse.Open
 
-    local ANCHOR_NAMES = { "Por defecto", "Cursor", "Cursor izquierda", "Cursor derecha" }
+        dropdown:SetupMenu(function(_, rootDescription)
+            rootDescription:SetScrollMode(320)
+            -- Primero los sonidos de LizeUI y despues el resto, cada grupo en orden alfabetico
+            local own, others = {}, {}
+            for _, name in ipairs(LSM and LSM:List("sound") or {}) do
+                if name:find("^LizeUI ") then own[#own + 1] = name else others[#others + 1] = name end
+            end
+            table.sort(own)
+            table.sort(others)
+            local function addSound(name)
+                -- Los espacios finales dejan sitio al boton de escuchar
+                local radio = rootDescription:CreateRadio(name .. "      ",
+                    function() return database[key] == name end,
+                    function()
+                        if isOverPlayIcon(name) then
+                            -- Solo escuchar: no cambia la seleccion y el menu sigue abierto
+                            if Utilities then Utilities:PlaySoundByName(name) end
+                            return keepOpen
+                        end
+                        database[key] = name
+                        if Utilities then Utilities:PlaySoundByName(name) end
+                    end)
+                if radio.AddInitializer then
+                    radio:AddInitializer(function(button) pcall(attachPlayIcon, button, name) end)
+                end
+                if radio.AddResetter then
+                    radio:AddResetter(function(button)
+                        if button.lizePlayIcon then button.lizePlayIcon:Hide() end
+                    end)
+                end
+            end
+            for _, name in ipairs(own) do addSound(name) end
+            if #own > 0 and #others > 0 and rootDescription.CreateDivider then
+                rootDescription:CreateDivider()
+            end
+            for _, name in ipairs(others) do addSound(name) end
+        end)
+        dropdown.Refresh = function(self) if self.GenerateMenu then self:GenerateMenu() end end
+        utilRefreshers[#utilRefreshers + 1] = dropdown
+
+        local preview = CreateFrame("Button", nil, utilPanel, "UIPanelButtonTemplate")
+        preview:SetSize(80, 22)
+        preview:SetPoint("LEFT", dropdown, "RIGHT", 6, 0)
+        preview:SetText(L.BTN_PREVIEW)
+        preview:SetScript("OnClick", function()
+            if Utilities then Utilities:PlaySoundByName(database[key]) end
+        end)
+        return { widget = dropdown, preview = preview }
+    end
+    local function setPickerEnabled(picker, enabled)
+        for _, w in ipairs({ picker.widget, picker.preview }) do
+            if enabled then w:Enable() else w:Disable() end
+            w:SetAlpha(enabled and 1 or 0.5)
+        end
+    end
+    local function refreshChatModule()
+        if Utilities then Utilities:RefreshChat() end
+    end
+
+    createDivider(utilPanel, L.DIV_CHAT, -30)
+    local chatHideGuild = addUtilCheckbox(L.OPT_CHAT_HIDE_GUILD, COL1, -45, "chatHideGuildLogin", refreshChatModule,
+        L.OPT_CHAT_HIDE_GUILD_DESC)
+    local chatGuildSound = addUtilCheckbox(L.OPT_CHAT_GUILD_SOUND, COL2, -45, "chatMuteGuildLogin", refreshChatModule,
+        L.OPT_CHAT_GUILD_SOUND_DESC)
+
+    local chatGuildChat = addUtilCheckbox(L.OPT_CHAT_GUILD_CHAT, COL1, -80, "chatGuildChatSound", refreshChatModule,
+        L.OPT_CHAT_GUILD_CHAT_DESC)
+    local guildChatSoundPicker = createSoundPicker("chatGuildChatSoundName", COL2 + 20, -82)
+
+    local chatWhisper = addUtilCheckbox(L.OPT_CHAT_WHISPER, COL1, -115, "chatWhisperSound", refreshChatModule,
+        L.OPT_CHAT_WHISPER_DESC)
+    local whisperSoundPicker = createSoundPicker("chatWhisperSoundName", COL2 + 20, -117)
+
+    local chatKeywords = addUtilCheckbox(L.OPT_CHAT_KEYWORDS, COL1, -150, "chatKeywordAlert", refreshChatModule,
+        L.OPT_CHAT_KEYWORDS_DESC)
+    local keywordSoundPicker = createSoundPicker("chatKeywordSound", COL2 + 20, -152)
+
+    local chatWordsBox = CreateFrame("EditBox", nil, utilPanel, "InputBoxTemplate")
+    chatWordsBox:SetSize(330, 20)
+    chatWordsBox:SetPoint("TOPLEFT", utilPanel, "TOPLEFT", COL1 + 240, -187)
+    chatWordsBox:SetAutoFocus(false)
+    chatWordsBox:SetMaxLetters(250)
+    local chatWordsLabel = utilPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    chatWordsLabel:SetPoint("RIGHT", chatWordsBox, "LEFT", -10, 0)
+    chatWordsLabel:SetText(L.CHAT_KEYWORDS_LABEL)
+    local function saveChatWords()
+        database.chatKeywords = strtrim(chatWordsBox:GetText() or "")
+    end
+    chatWordsBox:SetScript("OnTextChanged", function(_, userInput)
+        if userInput then saveChatWords() end
+    end)
+    chatWordsBox:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+    chatWordsBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    chatWordsBox:SetScript("OnEditFocusLost", saveChatWords)
+    chatWordsBox.Refresh = function(self) self:SetText(database.chatKeywords or "") end
+    utilRefreshers[#utilRefreshers + 1] = chatWordsBox
+    local chatWords = { widget = chatWordsBox, label = chatWordsLabel }
+
+    -- Seccion: Tooltip
+    createDivider(utilPanel, L.DIV_TOOLTIP, -235)
+    local tipEnable = addUtilCheckbox(L.OPT_TIP_ENABLE, COL1, -250, "tipEnabled", refreshTooltipModule,
+        L.OPT_TIP_ENABLE_DESC)
+    local tipHealth = addUtilCheckbox(L.OPT_TIP_NOHEALTH, COL2, -250, "tipNoHealthBar", refreshTooltipModule)
+    local tipRank = addUtilCheckbox(L.OPT_TIP_RANK, COL1, -280, "tipShowRank")
+    local tipOtherRank = addUtilCheckbox(L.OPT_TIP_OTHERRANK, COL2, -280, "tipShowOtherRank")
+    local tipTarget = addUtilCheckbox(L.OPT_TIP_TARGET, COL1, -310, "tipShowTarget")
+    local tipFaction = addUtilCheckbox(L.OPT_TIP_FACTION, COL2, -310, "tipBackFaction", nil,
+        L.OPT_TIP_FACTION_DESC)
+    local tipCombat = addUtilCheckbox(L.OPT_TIP_COMBAT, COL1, -340, "tipHideInCombat")
+    local tipShift = addUtilCheckbox(L.OPT_TIP_SHIFT, COL2, -340, "tipHideShiftOverride")
+
+    local ANCHOR_NAMES = { L.ANCHOR_DEFAULT, L.ANCHOR_CURSOR, L.ANCHOR_CURSOR_LEFT, L.ANCHOR_CURSOR_RIGHT }
     local anchorButton = CreateFrame("Button", nil, utilPanel, "UIPanelButtonTemplate")
     anchorButton:SetSize(200, 24)
-    anchorButton:SetPoint("TOPLEFT", utilPanel, "TOPLEFT", COL1 + 25, -185)
+    anchorButton:SetPoint("TOPLEFT", utilPanel, "TOPLEFT", COL1 + 25, -390)
     local anchorLabel = utilPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     anchorLabel:SetPoint("BOTTOM", anchorButton, "TOP", 0, 4)
-    anchorLabel:SetText("Anclaje (unidades del mundo)")
+    anchorLabel:SetText(L.TIP_ANCHOR_LABEL)
     anchorButton.Refresh = function(self)
         local value = tonumber(database.tipAnchor) or 1
         self:SetText(ANCHOR_NAMES[value] or ANCHOR_NAMES[1])
@@ -1453,35 +2149,56 @@ local function createSettings()
     utilRefreshers[#utilRefreshers + 1] = anchorButton
     local tipAnchor = { widget = anchorButton, label = anchorLabel }
 
-    local tipScale = addUtilSlider("LizeUITipScaleSlider", 0.5, 2, 0.05, "tipScale", COL2 + 5, -190, 2, "Escala: %s",
+    local tipScale = addUtilSlider("LizeUITipScaleSlider", 0.5, 2, 0.05, "tipScale", COL2 + 5, -395, 2, L.FMT_TIP_SCALE,
         refreshTooltipModule)
-    local tipX = addUtilSlider("LizeUITipCursorXSlider", -128, 128, 1, "tipCursorX", COL1 + 35, -240, 0, "Desplazamiento X: %s")
-    local tipY = addUtilSlider("LizeUITipCursorYSlider", -128, 128, 1, "tipCursorY", COL2 + 5, -240, 0, "Desplazamiento Y: %s")
+    local tipX = addUtilSlider("LizeUITipCursorXSlider", -128, 128, 1, "tipCursorX", COL1 + 35, -445, 0, L.FMT_TIP_X)
+    local tipY = addUtilSlider("LizeUITipCursorYSlider", -128, 128, 1, "tipCursorY", COL2 + 5, -445, 0, L.FMT_TIP_Y)
+
+    local tipAuction = addUtilCheckbox(L.OPT_TIP_AUCTION, COL1, -475, "tipAuctionNet", nil,
+        L.OPT_TIP_AUCTION_DESC)
+    local tipAuctionMissing = utilPanel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    tipAuctionMissing:SetPoint("TOPLEFT", utilPanel, "TOPLEFT", COL2, -483)
+    tipAuctionMissing:SetText(L.TIP_AUCTION_MISSING)
 
     -- Seccion: Automatizacion
-    createDivider(utilPanel, "Automatizacion", -285)
-    local autoRepair = addUtilCheckbox("Reparar automaticamente", COL1, -300, "autoRepair", refreshAutomationModule,
-        "Repara todo el equipo al abrir un vendedor que pueda reparar. Manten Shift al abrirlo para no reparar.")
-    local autoRepairGuild = addUtilCheckbox("Usar fondos de la hermandad", COL2, -300, "autoRepairGuild", nil,
-        "Si tienes permiso, la reparacion se paga con el banco de la hermandad (si se agota el limite, con tu oro).")
-    local autoSell = addUtilCheckbox("Vender objetos pobres", COL1, -330, "autoSellJunk", refreshAutomationModule,
-        "Vende los objetos grises al abrir un vendedor. Manten Shift al abrirlo para no vender.")
-    local autoSellGear = addUtilCheckbox("No vender equipo gris no ligado", COL2, -330, "autoSellNoGreyGear", nil,
-        "Armas y armaduras grises que no estan ligadas no se venden (por si quieres subastarlas).")
-    local autoSummary = addUtilCheckbox("Resumen en el chat (reparar / vender)", COL1, -360, "autoShowSummary")
-    local fasterLoot = addUtilCheckbox("Despojar rapido", COL2, -360, "fasterLoot", refreshAutomationModule,
-        "Recoge todo el botin al instante cuando el despojo automatico esta activo.")
-    local inviteWhisper = addUtilCheckbox("Invitacion por susurro", COL1, -390, "inviteFromWhisper", refreshAutomationModule,
-        "Invita al grupo a quien te susurre la palabra clave.")
+    createDivider(utilPanel, L.DIV_AUTOMATION, -525)
+    do
+        local groupLabel = utilPanel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        groupLabel:SetPoint("TOPLEFT", utilPanel, "TOPLEFT", COL1 + 4, -535)
+        groupLabel:SetText(L.GROUP_VENDOR)
+    end
+    local autoRepair = addUtilCheckbox(L.OPT_REPAIR, COL1, -550, "autoRepair", refreshAutomationModule,
+        L.OPT_REPAIR_DESC)
+    local autoRepairGuild = addUtilCheckbox(L.OPT_REPAIR_GUILD, COL2, -550, "autoRepairGuild", nil,
+        L.OPT_REPAIR_GUILD_DESC)
+    local autoSell = addUtilCheckbox(L.OPT_SELL_JUNK, COL1, -580, "autoSellJunk", refreshAutomationModule,
+        L.OPT_SELL_JUNK_DESC)
+    local autoSellGear = addUtilCheckbox(L.OPT_SELL_NOGEAR, COL2, -580, "autoSellNoGreyGear", nil,
+        L.OPT_SELL_NOGEAR_DESC)
+    local autoSummary = addUtilCheckbox(L.OPT_SUMMARY, COL1, -610, "autoShowSummary")
+    do
+        local groupLabel = utilPanel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        groupLabel:SetPoint("TOPLEFT", utilPanel, "TOPLEFT", COL1 + 4, -650)
+        groupLabel:SetText(L.GROUP_LOOT)
+    end
+    local fasterLoot = addUtilCheckbox(L.OPT_FASTER_LOOT, COL1, -665, "fasterLoot", refreshAutomationModule,
+        L.OPT_FASTER_LOOT_DESC)
+    do
+        local groupLabel = utilPanel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        groupLabel:SetPoint("TOPLEFT", utilPanel, "TOPLEFT", COL1 + 4, -705)
+        groupLabel:SetText(L.GROUP_PARTY)
+    end
+    local inviteWhisper = addUtilCheckbox(L.OPT_INVITE_WHISPER, COL1, -720, "inviteFromWhisper", refreshAutomationModule,
+        L.OPT_INVITE_WHISPER_DESC)
 
     local keywordBox = CreateFrame("EditBox", nil, utilPanel, "InputBoxTemplate")
     keywordBox:SetSize(110, 20)
-    keywordBox:SetPoint("TOPLEFT", utilPanel, "TOPLEFT", COL2 + 105, -394)
+    keywordBox:SetPoint("TOPLEFT", utilPanel, "TOPLEFT", COL2 + 105, -724)
     keywordBox:SetAutoFocus(false)
     keywordBox:SetMaxLetters(30)
     local keywordLabel = utilPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     keywordLabel:SetPoint("RIGHT", keywordBox, "LEFT", -10, 0)
-    keywordLabel:SetText("Palabra clave:")
+    keywordLabel:SetText(L.KEYWORD_LABEL)
     local function saveKeyword()
         local text = strtrim(keywordBox:GetText() or "")
         database.inviteKeyword = text ~= "" and text or "inv"
@@ -1499,16 +2216,22 @@ local function createSettings()
     utilRefreshers[#utilRefreshers + 1] = keywordBox
     local inviteKeyword = { widget = keywordBox, label = keywordLabel }
 
-    local inviteFriends = addUtilCheckbox("Invitar solo a amigos", COL1, -420, "inviteFriendsOnly")
-    local acceptFriends = addUtilCheckbox("Aceptar grupo de amigos", COL2, -420, "acceptPartyFriends", refreshAutomationModule,
-        "Acepta automaticamente las invitaciones de grupo de tus amigos (si no estas en cola de buscador).")
-    local friendlyGuild = addUtilCheckbox("Contar la hermandad como amigos", COL1, -450, "friendlyGuild", nil,
-        "Los miembros conectados de tu hermandad cuentan como amigos para invitar y aceptar grupo.")
-    local lootDelay = addUtilSlider("LizeUIFasterLootDelaySlider", 0.1, 0.3, 0.1, "fasterLootDelay", COL2 + 5, -460, 1,
-        "Retardo del despojo: %s s")
+    local inviteFriends = addUtilCheckbox(L.OPT_INVITE_FRIENDS, COL1, -750, "inviteFriendsOnly")
+    local acceptFriends = addUtilCheckbox(L.OPT_ACCEPT_FRIENDS, COL2, -750, "acceptPartyFriends", refreshAutomationModule,
+        L.OPT_ACCEPT_FRIENDS_DESC)
+    local friendlyGuild = addUtilCheckbox(L.OPT_FRIENDLY_GUILD, COL1, -780, "friendlyGuild", nil,
+        L.OPT_FRIENDLY_GUILD_DESC)
+    local lootDelay = addUtilSlider("LizeUIFasterLootDelaySlider", 0.1, 0.3, 0.1, "fasterLootDelay", COL2 + 5, -672, 1,
+        L.FMT_LOOT_DELAY)
+
+    -- Seccion: Interfaz
+    createDivider(utilPanel, L.DIV_INTERFACE, -830)
+    local issueReport = addUtilCheckbox(L.OPT_ISSUE_REPORT, COL1, -845, "eliminarBotonIssueReport",
+        function() updateIssueReportButton(database.eliminarBotonIssueReport == true) end,
+        L.OPT_ISSUE_REPORT_DESC)
 
     local utilStatusText = utilPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    utilStatusText:SetPoint("TOPLEFT", utilPanel, "TOPLEFT", 20, -500)
+    utilStatusText:SetPoint("TOPLEFT", utilPanel, "TOPLEFT", 20, -890)
     utilStatusText:SetWidth(640)
     utilStatusText:SetJustifyH("LEFT")
     utilStatusText:SetJustifyV("TOP")
@@ -1516,8 +2239,7 @@ local function createSettings()
     local function updateUtilStatus()
         local conflicts = Utilities and Utilities:GetLeatrixConflicts() or {}
         if #conflicts > 0 then
-            utilStatusText:SetText("|cffffaa33Leatrix Plus tiene activas opciones equivalentes:|r " .. table.concat(conflicts, ", ") ..
-                ". Desactivalas en Leatrix Plus o aqui para que no se hagan dos veces.")
+            utilStatusText:SetText(L.LEATRIX_CONFLICT:format(table.concat(conflicts, ", ")))
         else
             utilStatusText:SetText("")
         end
@@ -1540,6 +2262,15 @@ local function createSettings()
         setControlEnabled(inviteFriends, database.inviteFromWhisper == true)
         setControlEnabled(friendlyGuild, database.inviteFromWhisper == true or database.acceptPartyFriends == true)
         setControlEnabled(lootDelay, database.fasterLoot == true)
+
+        setPickerEnabled(guildChatSoundPicker, database.chatGuildChatSound == true)
+        setPickerEnabled(whisperSoundPicker, database.chatWhisperSound == true)
+        setPickerEnabled(keywordSoundPicker, database.chatKeywordAlert == true)
+        setControlEnabled(chatWords, database.chatKeywordAlert == true)
+
+        local hasAuctionator = isAddonLoaded("Auctionator") and Utilities and Utilities:IsAuctionatorAvailable()
+        setControlEnabled(tipAuction, hasAuctionator and true or false)
+        if hasAuctionator then tipAuctionMissing:Hide() else tipAuctionMissing:Show() end
     end
 
     local function refreshUtilPanel()
@@ -1549,30 +2280,239 @@ local function createSettings()
         utilPanel.UpdateState()
         updateUtilStatus()
     end
-    utilPanel.OnRefresh = refreshUtilPanel
-    utilPanel:SetScript("OnShow", refreshUtilPanel)
+    utilFrame.OnRefresh = refreshUtilPanel
+    utilFrame:SetScript("OnShow", refreshUtilPanel)
     refreshUtilPanel()
 
-    local checkPanel = createSettingsPanel("Check Addons", "LizeUI")
-    local checkTitle = checkPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    checkTitle:SetPoint("TOPLEFT", checkPanel, "TOPLEFT", 20, -20)
-    checkTitle:SetText("Estado de addons")
-    local checkText = checkPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    checkText:SetPoint("TOPLEFT", checkTitle, "BOTTOMLEFT", 0, -15)
-    checkText:SetJustifyH("LEFT")
-    checkText:SetText("BetterBlizzFrames: " .. (isAddonLoaded("BetterBlizzFrames") and "cargado" or "no cargado") .. "\nBetterBlizzPlates: " .. (isAddonLoaded("BetterBlizzPlates") and "cargado" or "no cargado") .. "\nDetails: " .. (isAddonLoaded("Details") and "cargado" or "no cargado") .. "\nRXPGuides: " .. (isAddonLoaded("RXPGuides") and "cargado" or "no cargado"))
+    -- Panel principal, parte superior: estado de addons
+    createDivider(basePanel, L.DIV_ADDON_STATUS, -30)
+    local baseAddonList = createAddonStatusList(basePanel, -45, 25)
+    basePanel.UpdateStatus = baseAddonList.Update
+    basePanel.OnRefresh = basePanel.UpdateStatus
+    basePanel:SetScript("OnShow", basePanel.UpdateStatus)
+    basePanel.UpdateStatus()
 
-    local supportPanel = createSettingsPanel("Support", "LizeUI")
-    local supportText = supportPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    supportText:SetPoint("TOPLEFT", supportPanel, "TOPLEFT", 20, -20)
-    supportText:SetText("LizeUI - soporte y ayuda")
+    -- Panel de cambios: lista de versiones a la izquierda y detalle a la derecha
+    -- (los textos estan en languages/changelog/esES.lua y enUS.lua)
+    local changesPanel = createSettingsPanel(L.MENU_CHANGES, "LizeUI")
+    local changelog = getChangelog()
+
+    local versionsLabel = changesPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    versionsLabel:SetPoint("TOPLEFT", changesPanel, "TOPLEFT", 25, -25)
+    versionsLabel:SetText(L.CHANGELOG_VERSIONS)
+
+    local changesTitle = changesPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    changesTitle:SetPoint("TOPLEFT", changesPanel, "TOPLEFT", 175, -22)
+    changesTitle:SetPoint("RIGHT", changesPanel, "RIGHT", -25, 0)
+    changesTitle:SetJustifyH("LEFT")
+
+    local changesMeta = changesPanel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    changesMeta:SetPoint("TOPLEFT", changesTitle, "BOTTOMLEFT", 0, -6)
+
+    local changesLine = changesPanel:CreateTexture(nil, "ARTWORK")
+    changesLine:SetColorTexture(0.5, 0.5, 0.5, 0.6)
+    changesLine:SetHeight(1)
+    changesLine:SetPoint("TOPLEFT", changesPanel, "TOPLEFT", 175, -64)
+    changesLine:SetPoint("RIGHT", changesPanel, "RIGHT", -25, 0)
+
+    local columnLine = changesPanel:CreateTexture(nil, "ARTWORK")
+    columnLine:SetColorTexture(0.5, 0.5, 0.5, 0.4)
+    columnLine:SetWidth(1)
+    columnLine:SetPoint("TOPLEFT", changesPanel, "TOPLEFT", 160, -22)
+    columnLine:SetPoint("BOTTOMLEFT", changesPanel, "BOTTOMLEFT", 160, 20)
+
+    -- Texto del detalle dentro de un ScrollFrame
+    local changesScrollOk, changesScroll = pcall(CreateFrame, "ScrollFrame", nil, changesPanel, "ScrollFrameTemplate")
+    if not changesScrollOk or not changesScroll then
+        changesScroll = CreateFrame("ScrollFrame", nil, changesPanel, "UIPanelScrollFrameTemplate")
+    end
+    changesScroll:SetPoint("TOPLEFT", changesPanel, "TOPLEFT", 175, -74)
+    changesScroll:SetPoint("BOTTOMRIGHT", changesPanel, "BOTTOMRIGHT", -30, 20)
+    local changesContent = CreateFrame("Frame", nil, changesScroll)
+    changesContent:SetSize(400, 400)
+    changesScroll:SetScrollChild(changesContent)
+    local changesText = changesContent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    changesText:SetPoint("TOPLEFT", changesContent, "TOPLEFT", 0, 0)
+    changesText:SetWidth(400)
+    changesText:SetJustifyH("LEFT")
+    changesText:SetJustifyV("TOP")
+    changesText:SetSpacing(3)
+    local function resizeChangesText()
+        local width = changesScroll:GetWidth()
+        if not width or width <= 0 then return end
+        changesContent:SetWidth(width)
+        changesText:SetWidth(width - 10)
+        changesContent:SetHeight(math.max(changesText:GetStringHeight() + 10, 10))
+    end
+    changesScroll:SetScript("OnSizeChanged", resizeChangesText)
+
+    local versionRows = {}
+    local function selectVersion(index)
+        local entry = changelog[index]
+        for i, row in ipairs(versionRows) do
+            local selected = i == index
+            row.bg:SetColorTexture(selected and 0.2 or 1, selected and 0.55 or 1, selected and 1 or 1,
+                selected and 0.35 or (i % 2 == 0 and 0.03 or 0.06))
+            row.text:SetFontObject(selected and "GameFontHighlight" or "GameFontNormal")
+        end
+        if not entry then
+            changesTitle:SetText(L.CHANGELOG_EMPTY)
+            changesMeta:SetText("")
+            changesText:SetText("")
+        else
+            changesTitle:SetText(entry.title or entry.version)
+            changesMeta:SetText(L.FMT_CHANGELOG_META:format(entry.version, entry.date or ""))
+            changesText:SetText(formatChangelogLines(entry.lines))
+        end
+        changesScroll:SetVerticalScroll(0)
+        resizeChangesText()
+    end
+
+    for index, entry in ipairs(changelog) do
+        local row = CreateFrame("Button", nil, changesPanel)
+        row:SetSize(125, 24)
+        row:SetPoint("TOPLEFT", changesPanel, "TOPLEFT", 22, -42 - (index - 1) * 26)
+        row.bg = row:CreateTexture(nil, "BACKGROUND")
+        row.bg:SetAllPoints()
+        row.text = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        row.text:SetPoint("LEFT", row, "LEFT", 10, 0)
+        row.text:SetText((index == 1 and "|TInterface\\COMMON\\Indicator-Green:12:12:0:0|t " or "") .. entry.version)
+        local highlight = row:CreateTexture(nil, "HIGHLIGHT")
+        highlight:SetAllPoints()
+        highlight:SetColorTexture(1, 1, 1, 0.08)
+        row:SetScript("OnClick", function() selectVersion(index) end)
+        versionRows[index] = row
+    end
+    selectVersion(1)
+
+    -- Activable: mostrar la ventana de novedades al actualizar (el mismo ajuste que su casilla)
+    local showPopupCheck = CreateFrame("CheckButton", nil, changesPanel, "UICheckButtonTemplate")
+    showPopupCheck:SetPoint("BOTTOMLEFT", changesPanel, "BOTTOMLEFT", 20, 15)
+    local showPopupLabel = changesPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    showPopupLabel:SetPoint("TOPLEFT", showPopupCheck, "TOPRIGHT", 0, -6)
+    showPopupLabel:SetWidth(110)
+    showPopupLabel:SetJustifyH("LEFT")
+    showPopupLabel:SetText(L.OPT_SHOW_WHATSNEW)
+    showPopupCheck:SetScript("OnClick", function(self)
+        database.hideChangelogPopup = not self:GetChecked()
+    end)
+    changesPanel:SetScript("OnShow", function()
+        showPopupCheck:SetChecked(database.hideChangelogPopup ~= true)
+        resizeChangesText()
+    end)
+
+    -- Panel de soporte: cabecera con logo, donaciones y enlaces
+    -- (mismos datos que la seccion Informacion de ElvUI_LizeUI)
+    local supportPanel = createSettingsPanel(L.MENU_SUPPORT, "LizeUI")
+    local LIZEUI_GRADIENT = gradientText("LizeUI", 0, 192, 250, 130, 85, 255)
+    local PATREON_URL = "https://www.patreon.com/cw/Lizerius"
+    local CURSEFORGE_URL = "https://www.curseforge.com/wow/addons/lizeui-forever"
+
+    local supportLogo = supportPanel:CreateTexture(nil, "ARTWORK")
+    supportLogo:SetSize(64, 64)
+    supportLogo:SetPoint("TOPLEFT", supportPanel, "TOPLEFT", 25, -20)
+    supportLogo:SetTexture(ICON_PATH .. "lizeui_portrait.tga")
+
+    local supportTitle = supportPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
+    supportTitle:SetPoint("TOPLEFT", supportLogo, "TOPRIGHT", 14, -8)
+    supportTitle:SetText(LIZEUI_GRADIENT)
+
+    local getMetadata = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
+    local addonVersion = getMetadata and getMetadata(addonName, "Version") or "?"
+    local supportSubtitle = supportPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    supportSubtitle:SetPoint("TOPLEFT", supportTitle, "BOTTOMLEFT", 0, -6)
+    supportSubtitle:SetText(L.SUPPORT_SUBTITLE .. "  |cff888888" .. L.FMT_VERSION:format(addonVersion) .. "|r")
+
+    local function showCopyUrl(title, url)
+        StaticPopupDialogs["LIZEUI_COPY_URL"].text = "%s"
+        StaticPopupDialogs["LIZEUI_COPY_URL"].button1 = L.CLOSE
+        StaticPopup_Show("LIZEUI_COPY_URL", title, nil, url)
+    end
+
+    -- Donaciones
+    createDivider(supportPanel, L.DIV_DONATIONS, -110)
+    local donateText = supportPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    donateText:SetPoint("TOPLEFT", supportPanel, "TOPLEFT", 25, -128)
+    donateText:SetPoint("RIGHT", supportPanel, "RIGHT", -25, 0)
+    donateText:SetJustifyH("LEFT")
+    donateText:SetSpacing(3)
+    donateText:SetText(L.DONATE_LINE1_FMT:format(LIZEUI_GRADIENT) .. "\n\n" .. L.DONATE_LINE2 .. "\n" .. L.DONATE_LINE3)
+
+    local patreonButton = CreateFrame("Button", nil, supportPanel, "SharedButtonTemplate")
+    patreonButton:SetSize(190, 36)
+    patreonButton:SetPoint("TOP", supportPanel, "TOP", 0, -215)
+    patreonButton:SetText(("|T%scafe.tga:16:16:0:0|t %s"):format(ICON_PATH, L.BTN_PATREON))
+    patreonButton:SetScript("OnClick", function()
+        showCopyUrl(L.BTN_PATREON, PATREON_URL)
+    end)
+
+    -- Enlaces
+    createDivider(supportPanel, L.DIV_LINKS, -280)
+    local linksText = supportPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    linksText:SetPoint("TOPLEFT", supportPanel, "TOPLEFT", 25, -298)
+    linksText:SetText(L.LINKS_DESC)
+
+    local function createLinkRow(label, url, y)
+        local name = supportPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        name:SetPoint("TOPLEFT", supportPanel, "TOPLEFT", 30, y)
+        name:SetText(label)
+
+        local box = CreateFrame("EditBox", nil, supportPanel, "InputBoxTemplate")
+        box:SetSize(420, 20)
+        box:SetPoint("LEFT", name, "LEFT", 110, 0)
+        box:SetAutoFocus(false)
+        box:SetText(url)
+        box:SetCursorPosition(0)
+        -- Solo lectura: siempre vuelve a la URL y la selecciona para copiar
+        box:SetScript("OnTextChanged", function(self, userInput)
+            if userInput then self:SetText(url); self:HighlightText() end
+        end)
+        box:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
+        box:SetScript("OnEditFocusLost", function(self) self:HighlightText(0, 0); self:SetCursorPosition(0) end)
+        box:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+        box:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+        return box
+    end
+    createLinkRow(L.LINK_CURSEFORGE, CURSEFORGE_URL, -325)
+    createLinkRow(L.LINK_PATREON, PATREON_URL, -355)
 
     local category = Settings.RegisterCanvasLayoutCategory(basePanel, "LizeUI", "LizeUI")
     Settings.RegisterAddOnCategory(category)
-    Settings.RegisterCanvasLayoutSubcategory(category, navPanel, "Navegacion RXP", "Navegacion RXP")
-    Settings.RegisterCanvasLayoutSubcategory(category, utilPanel, "Utilidades", "Utilidades")
-    Settings.RegisterCanvasLayoutSubcategory(category, checkPanel, "Check Addons", "Check Addons")
-    Settings.RegisterCanvasLayoutSubcategory(category, supportPanel, "Support", "Support")
+    Settings.RegisterCanvasLayoutSubcategory(category, utilFrame, L.MENU_UTILITIES, L.MENU_UTILITIES)
+    Settings.RegisterCanvasLayoutSubcategory(category, darkPanel, L.MENU_DARKMODE, L.MENU_DARKMODE)
+    Settings.RegisterCanvasLayoutSubcategory(category, navPanel, L.MENU_NAVIGATION, L.MENU_NAVIGATION)
+    local changesCategory = Settings.RegisterCanvasLayoutSubcategory(category, changesPanel, L.MENU_CHANGES, L.MENU_CHANGES)
+    openChangesPanel = function()
+        category.expanded = true
+        local id = changesCategory and (changesCategory.ID or (changesCategory.GetID and changesCategory:GetID()))
+        if id and Settings.OpenToCategory then Settings.OpenToCategory(id) end
+    end
+    Settings.RegisterCanvasLayoutSubcategory(category, supportPanel, L.MENU_SUPPORT, L.MENU_SUPPORT)
+    settingsCategory = category
+
+    -- Al seleccionar "LizeUI" en la lista se despliegan sus subcategorias,
+    -- igual que al pulsar la flecha, para que se vea que hay mas opciones.
+    -- Al cerrar el menu de Ajustes, recordar recargar si se activo algun addon
+    if SettingsPanel then
+        SettingsPanel:HookScript("OnHide", function() C_Timer.After(0.1, showReloadReminder) end)
+    end
+
+    category.expanded = true
+    basePanel:HookScript("OnShow", function()
+        if category.expanded then return end
+        if category.SetExpanded then
+            pcall(category.SetExpanded, category, true)
+        end
+        category.expanded = true
+        C_Timer.After(0, function()
+            local list = SettingsPanel and SettingsPanel.GetCategoryList and SettingsPanel:GetCategoryList()
+            if list and list.CreateCategories then
+                pcall(list.CreateCategories, list)
+            elseif Settings.OpenToCategory then
+                pcall(Settings.OpenToCategory, category.ID or (category.GetID and category:GetID()))
+            end
+        end)
+    end)
 end
 
 local function showWindow()
@@ -1589,16 +2529,90 @@ local function updateDevModeVisibility()
     end
 end
 
+-- Al entrar: si la version instalada es mas nueva que la ultima vista, se
+-- muestran sus cambios (salvo que el usuario lo haya desactivado).
+-- La ultima version vista se guarda para toda la cuenta.
+local function checkForUpdate()
+    local current = getAddonVersion()
+    local lastSeen = database.lastSeenVersion
+    if lastSeen == nil then
+        -- Sin registro: instalacion nueva (no hay nada que contar) o una version
+        -- anterior a 2.0.0, que aun no guardaba la version (tenia windowOpened en la cuenta).
+        if database.windowOpened then
+            lastSeen = "1.5.0"
+            database.windowOpened = nil
+        else
+            database.lastSeenVersion = current
+            return
+        end
+    end
+    if compareVersions(current, lastSeen) <= 0 then
+        database.lastSeenVersion = current
+        return
+    end
+    database.lastSeenVersion = current
+    -- Aviso en el chat siempre; la ventana solo si no se ha desactivado
+    printMessage(L.FMT_NEW_VERSION:format(current, lastSeen))
+    if database.hideChangelogPopup then return end
+
+    local function show() showWhatsNew(lastSeen) end
+    if window:IsShown() then
+        -- Primero la ventana de instalacion; al cerrarla, las novedades
+        local pending = true
+        window:HookScript("OnHide", function()
+            if pending then pending = false; C_Timer.After(0.2, show) end
+        end)
+    else
+        C_Timer.After(1, show)
+    end
+end
+
+-- Abre el menu de Ajustes del juego con LizeUI seleccionado (y desplegado)
+local function openSettings()
+    if not settingsCategory or not Settings or not Settings.OpenToCategory then return end
+    settingsCategory.expanded = true
+    local id = settingsCategory.ID or (settingsCategory.GetID and settingsCategory:GetID())
+    Settings.OpenToCategory(id)
+end
+
+local function printHelp()
+    printMessage(L.HELP_TITLE)
+    for _, key in ipairs({ "HELP_LUI", "HELP_HELP", "HELP_INSTALL", "HELP_LOAD_EN", "HELP_LOAD_ES", "HELP_ROUTE" }) do
+        DEFAULT_CHAT_FRAME:AddMessage("   " .. L[key])
+    end
+end
+
+local function switchLanguage(language)
+    if ns.GetLanguage() == language and database.language == language then
+        printMessage(L.LANG_ALREADY)
+        return
+    end
+    ns.SetLanguage(language)
+    printMessage(language == "en" and L.LANG_SET_EN or L.LANG_SET_ES)
+    ReloadUI()
+end
+
 SLASH_LIZEUI1 = "/lui"
 SlashCmdList.LIZEUI = function(msg)
-    if msg == "dev" then
+    msg = strlower(strtrim(msg or ""))
+    if msg == "" then
+        openSettings()
+    elseif msg == "help" then
+        printHelp()
+    elseif msg == "install" then
+        showWindow()
+    elseif msg == "load_en" then
+        switchLanguage("en")
+    elseif msg == "load_es" then
+        switchLanguage("es")
+    elseif msg == "dev" then
         database.devMode = not database.devMode
-        printMessage("Modo desarrollador: " .. (database.devMode and "activado" or "desactivado"))
+        printMessage(L.FMT_DEV_MODE:format(database.devMode and L.ENABLED or L.DISABLED))
         updateDevModeVisibility()
     elseif msg == "ruta" then
         database.navRouteEnabled = not database.navRouteEnabled
         if NavRoute then NavRoute:Refresh() end
-        printMessage("Ruta de navegacion: " .. (database.navRouteEnabled and "activada" or "desactivada"))
+        printMessage(L.FMT_NAV_TOGGLE:format(database.navRouteEnabled and L.ENABLED or L.DISABLED))
     elseif msg == "dark" then
         local function describe(obj)
             if obj == nil then return "NIL" end
@@ -1643,7 +2657,7 @@ SlashCmdList.LIZEUI = function(msg)
             printMessage("BetterBlizzFramesDB no existe")
         end
     else
-        showWindow()
+        printMessage(L.UNKNOWN_COMMAND)
     end
 end
 
@@ -1788,10 +2802,11 @@ addon:SetScript("OnEvent", function(_, event, arg1)
         if NavRoute then NavRoute:Init(database) end
         if Utilities then Utilities:Init(database) end
         scheduleDetailsTitleBarRefresh()
-        printMessage("Para abrir la ventana de nuevo, usa /lui.")
-        if not database.windowOpened then
-            database.windowOpened = true
+        printMessage(L.LOGIN_HINT:format(getAddonVersion()))
+        -- Primera vez de ESTE personaje con LizeUI: abrir la ventana
+        if not getCharDB().windowOpened then
             showWindow()
         end
+        checkForUpdate()
     end
 end)

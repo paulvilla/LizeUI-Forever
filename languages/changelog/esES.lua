@@ -1,0 +1,133 @@
+-- LizeUI - Registro de cambios (Español)
+-- Lista ordenada de la version mas nueva a la mas antigua.
+-- Formato de las lineas:
+--   "- texto"   -> punto de lista
+--   "# texto"   -> subtitulo
+--   ""          -> linea en blanco
+
+local _, ns = ...
+ns.Changelogs = ns.Changelogs or {}
+
+ns.Changelogs.es = {
+    {
+        version = "2.0.0",
+        date = "07/11/2026",
+        title = "Gran actualización: nuevo panel, chat mejorado y traducciones",
+        lines = {
+            "# Panel principal",
+            "- Nueva lista de estado de addons con iconos: cargado, desactivado, pendiente de /reload, no se puede cargar o no instalado.",
+            "- El estado se comprueba para el personaje actual.",
+            "- Botón Activar para los addons instalados pero desactivados y botón Descargar para los que faltan.",
+            "- Al cerrar la ventana avisa de recargar la interfaz si has activado algún addon.",
+            "- Botones de importación más compactos debajo de la lista.",
+            "- Al seleccionar LizeUI en el menú se despliegan todas sus secciones.",
+            "",
+            "# Utilidades",
+            "- Nueva sección Chat mejorado:",
+            "- Ocultar en el chat las conexiones de la hermandad.",
+            "- Desactivar el aviso de hermandad del juego, incluido su sonido.",
+            "- Sonido de mensajes de hermandad.",
+            "- Sonido de notificación de susurros (activado por defecto).",
+            "- Aviso sonoro cuando aparecen en el chat las palabras que elijas, separadas por comas.",
+            "- Los sonidos se eligen en un desplegable con los de LizeUI primero y un icono para escucharlos sin cerrarlo.",
+            "- Tooltip: nueva línea \"Neto -depósito\" bajo el precio de Auctionator. Resta 1 de plata de depósito y, en objetos apilables, multiplica por las unidades del stack. Si no cubre el depósito, muestra en rojo el dinero perdido. Activado por defecto.",
+            "- Automatización organizada en grupos: Vendedor, Botín y Grupo.",
+            "- Nueva sección Interfaces Betas WOW con la opción para eliminar el botón Issue Report.",
+            "- El panel tiene scroll para que quepan todas las opciones.",
+            "",
+            "# DarkMode",
+            "- Nueva sección con los marcos de buffs/debuffs, el Dark Mode y su intensidad.",
+            "- Se puede elegir cada sección del Dark Mode de BetterBlizzFrames: marcos de unidad, barras de acción, barras de lanzamiento, auras, minimapa, tooltip, textura de élite, objetivos y recurso en placa de nombre.",
+            "- Si BetterBlizzFrames no está cargado, la sección queda bloqueada con un aviso.",
+            "",
+            "# Navegación RXP",
+            "- Si RXPGuides no está cargado, las opciones quedan bloqueadas con un aviso.",
+            "",
+            "# Ventana de instalación",
+            "- Se abre la primera vez que entra cada personaje (antes solo una vez por cuenta).",
+            "- Muestra la misma lista de addons que el panel principal y bloquea las importaciones de los addons que no están cargados.",
+            "- Nuevo logo de LizeUI.",
+            "",
+            "# Idiomas y comandos",
+            "- Interfaz completa en español e inglés. Se elige sola según el idioma del cliente (español de España o Latinoamérica; el resto, inglés).",
+            "- /lui abre las opciones, /lui help muestra los comandos, /lui install abre la ventana de instalación, /lui load_en y /lui load_es cambian el idioma.",
+            "",
+            "# Otros",
+            "- Nuevas secciones Cambios y Soporte.",
+            "- Ventana de novedades y aviso en el chat al actualizar (la ventana se puede desactivar).",
+            "- Mensaje de bienvenida al entrar con el recordatorio de /lui help.",
+            "- Nuevos sonidos de LizeUI registrados en SharedMedia; se han retirado los sonidos antiguos.",
+            "- BetterBlizzFrames ya no es obligatorio. Todos los addons son ahora opcionales.",
+            "- Auctionator añadido como addon opcional.",
+            "- Eliminada la opción de cámara de DialogueUI.",
+        },
+    },
+    {
+        version = "1.5.0",
+        date = "07/11/2026",
+        title = "Ruta de navegación de RXPGuides y Utilidades",
+        lines = {
+            "# Ruta de navegación",
+            "- Dibuja en gris la ruta de RXPGuides en el minimapa y en el mapa del mundo: objetivo actual, waypoints restantes y pasos siguientes (más tenues).",
+            "- Flechas de dirección animadas opcionales y curvas suavizadas que pasan por todos los waypoints.",
+            "- Funciona con minimapas redondos o cuadrados, con el minimapa rotatorio y con OpenMap.",
+            "- Opciones de grosor, opacidad, tono de gris y número de pasos siguientes. Atajo: /lui ruta.",
+            "",
+            "# Utilidades",
+            "- Tooltip mejorado: color de clase, nivel por dificultad, rangos de hermandad, objetivo de la unidad, anclaje al cursor y escala.",
+            "- Automatización: reparar, vender objetos pobres, invitar por susurro, aceptar grupo de amigos y despojar rápido.",
+            "",
+            "# Otros",
+            "- Corregida la barra de título de Details que a veces aparecía en blanco.",
+            "- Perfiles actualizados.",
+        },
+    },
+    {
+        version = "1.1.2",
+        date = "05/11/2026",
+        title = "Perfiles actualizados",
+        lines = {
+            "- Actualizados los perfiles de BetterBlizzFrames y BetterBlizzPlates.",
+        },
+    },
+    {
+        version = "1.1.1",
+        date = "16/10/2026",
+        title = "Perfiles actualizados",
+        lines = {
+            "- Actualizado el perfil de BetterBlizzFrames.",
+        },
+    },
+    {
+        version = "1.1.0",
+        date = "26/09/2026",
+        title = "Dark Mode",
+        lines = {
+            "- Opción para activar el Dark Mode de BetterBlizzFrames desde LizeUI.",
+            "- Nuevo control para ajustar la intensidad del Dark Mode.",
+        },
+    },
+    {
+        version = "1.0.1",
+        date = "25/09/2026",
+        title = "Correcciones",
+        lines = {
+            "- Corregido el borde que aparecía al entrar en combate.",
+            "- Actualizado el perfil de BetterBlizzPlates.",
+        },
+    },
+    {
+        version = "1.0.0",
+        date = "25/09/2026",
+        title = "Primera versión de LizeUI Forever",
+        lines = {
+            "- Menú propio con el estilo de la interfaz de WoW Forever.",
+            "- LizeUI añadido en Opciones > AddOns.",
+            "- Submenús de comprobación de addons y de soporte.",
+            "- Botones para importar los perfiles de BetterBlizzPlates y BetterBlizzFrames.",
+            "- Marcos de buffs/debuffs y del objetivo editables (los iconos personalizados quitan el borde clásico).",
+            "- Opción para eliminar el botón Issue Report.",
+            "- Ángulo de rotación para el zoom de DialogueUI.",
+        },
+    },
+}

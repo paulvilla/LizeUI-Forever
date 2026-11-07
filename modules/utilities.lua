@@ -10,6 +10,8 @@
 
 local _, ns = ...
 
+local L = ns.L
+
 local Utilities = CreateFrame("Frame")
 ns.Utilities = Utilities
 
@@ -27,6 +29,17 @@ Utilities.defaults = {
     tipCursorX = 0,
     tipCursorY = 0,
     tipScale = 1.00,
+    tipAuctionNet = true, -- linea "Neto" bajo el precio de Auctionator (resta el deposito)
+    -- Chat mejorado
+    chatHideGuildLogin = false,
+    chatMuteGuildLogin = false, -- desactiva el sonido propio del juego al conectarse alguien de la hermandad
+    chatGuildChatSound = false,
+    chatGuildChatSoundName = "LizeUI Simple",
+    chatWhisperSound = true,
+    chatWhisperSoundName = "LizeUI Whisper",
+    chatKeywordAlert = false,
+    chatKeywords = "",
+    chatKeywordSound = "LizeUI Success",
     -- Automatizacion
     autoRepair = false,
     autoRepairGuild = false,
@@ -459,7 +472,7 @@ local function repairGear()
         RepairAllItems()
     end
     if setting("autoShowSummary") then
-        printMessage("Reparado por " .. coinText(cost) .. ".")
+        printMessage(L.FMT_REPAIRED:format(coinText(cost)))
     end
 end
 
@@ -480,7 +493,7 @@ local function stopSelling(showSummary)
     end
     sellFrame:UnregisterEvent("UI_ERROR_MESSAGE")
     if showSummary and sellTotal > 0 and setting("autoShowSummary") then
-        printMessage("Objetos pobres vendidos por " .. coinText(sellTotal) .. ".")
+        printMessage(L.FMT_JUNK_SOLD:format(coinText(sellTotal)))
     end
     sellTotal = 0
 end
@@ -654,9 +667,347 @@ Utilities:SetScript("OnEvent", function(_, event, ...)
     end
 end)
 
+-- ---------------------------------------------------------------------------
+-- Precio neto de subasta (Auctionator)
+-- Anade una linea pequena justo debajo de "Subasta" con lo que realmente se
+-- gana: precio de subasta * unidades del stack - deposito (1 de plata).
+-- Para objetos no apilables el stack es siempre 1.
+-- ---------------------------------------------------------------------------
+local AUCTION_DEPOSIT = 100 -- 1 de plata, en cobre
+local auctionHooked = false
+local auctionContext -- { link, count } del objeto que Auctionator esta pintando
+
+local function auctionMoneyString(amount)
+    if Auctionator and Auctionator.Utilities and Auctionator.Utilities.CreatePaddedMoneyString then
+        return Auctionator.Utilities.CreatePaddedMoneyString(amount)
+    end
+    return coinText(amount)
+end
+
+local function itemMaxStack(link)
+    if C_Item and C_Item.GetItemMaxStackSizeByID then
+        local itemID = C_Item.GetItemInfoInstant and C_Item.GetItemInfoInstant(link)
+        local size = itemID and C_Item.GetItemMaxStackSizeByID(itemID)
+        if size then return size end
+    end
+    local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+    return getInfo and select(8, getInfo(link)) or 1
+end
+
+-- Las lineas del tooltip se reutilizan: devolver la fuente normal al limpiar
+local function resetSmallLines(tooltip)
+    local lines = tooltip.lizeSmallLines
+    if not lines then return end
+    local name = tooltip:GetName()
+    for index in pairs(lines) do
+        local left, right = _G[name .. "TextLeft" .. index], _G[name .. "TextRight" .. index]
+        if left then left:SetFontObject(GameTooltipText) end
+        if right then right:SetFontObject(GameTooltipText) end
+    end
+    tooltip.lizeSmallLines = nil
+end
+
+local function addAuctionNetLine(tooltip, auctionPrice, _, cannotAuction)
+    local context = auctionContext
+    if not setting("tipAuctionNet") or not context or cannotAuction or auctionPrice == nil then return end
+    if not (tooltip and tooltip.AddDoubleLine) then return end
+
+    local unitPrice = Auctionator.Database and Auctionator.Database:GetFirstPrice(context.dbKeys)
+    if not unitPrice then return end
+
+    local count = 1
+    if (tonumber(itemMaxStack(context.link)) or 1) > 1 then
+        count = math.max(1, tonumber(context.count) or 1)
+    end
+
+    local net = math.floor(unitPrice * count) - AUCTION_DEPOSIT
+    local label = "  " .. L.AUCTION_NET
+    if count > 1 then label = label .. " |cff7fbfffx" .. count .. "|r" end
+    if net > 0 then
+        tooltip:AddDoubleLine(label, auctionMoneyString(net), 0.6, 0.6, 0.6, 0.5, 1, 0.5)
+    else
+        -- Dinero perdido (en rojo, con signo menos)
+        local lost = auctionMoneyString(-net)
+        if net < 0 then lost = "-" .. lost end
+        tooltip:AddDoubleLine(label, lost, 0.6, 0.6, 0.6, 1, 0.35, 0.35)
+    end
+
+    -- Letra pequena para no ensanchar el tooltip
+    local name = tooltip.GetName and tooltip:GetName()
+    local index = tooltip:NumLines()
+    local left = name and _G[name .. "TextLeft" .. index]
+    local right = name and _G[name .. "TextRight" .. index]
+    if left and right and GameTooltipTextSmall then
+        left:SetFontObject(GameTooltipTextSmall)
+        right:SetFontObject(GameTooltipTextSmall)
+        tooltip.lizeSmallLines = tooltip.lizeSmallLines or {}
+        tooltip.lizeSmallLines[index] = true
+        if not tooltip.lizeSmallResetHooked and tooltip.HookScript then
+            tooltip.lizeSmallResetHooked = true
+            tooltip:HookScript("OnTooltipCleared", resetSmallLines)
+        end
+    end
+end
+
+function Utilities:IsAuctionatorAvailable()
+    return type(Auctionator) == "table" and type(Auctionator.Tooltip) == "table"
+        and type(Auctionator.Tooltip.AddAuctionTip) == "function"
+        and type(Auctionator.Tooltip.ShowTipWithPricingDBKey) == "function"
+end
+
+function Utilities:HookAuctionator()
+    if auctionHooked or not self:IsAuctionatorAvailable() then return end
+    auctionHooked = true
+
+    -- Guardar el objeto/cantidad que se esta pintando (Auctionator llama a esta
+    -- funcion a traves de la tabla, asi que el envoltorio se usa siempre).
+    local original = Auctionator.Tooltip.ShowTipWithPricingDBKey
+    Auctionator.Tooltip.ShowTipWithPricingDBKey = function(tooltipFrame, dbKeys, itemLink, itemCount, ...)
+        auctionContext = { dbKeys = dbKeys, link = itemLink, count = itemCount }
+        local ok, err = pcall(original, tooltipFrame, dbKeys, itemLink, itemCount, ...)
+        auctionContext = nil
+        if not ok then error(err, 0) end
+    end
+
+    hooksecurefunc(Auctionator.Tooltip, "AddAuctionTip", addAuctionNetLine)
+end
+
+-- ---------------------------------------------------------------------------
+-- Chat mejorado
+--  * Ocultar los avisos de conexion/desconexion de la hermandad
+--  * Desactivar el aviso (sonido del juego) al conectarse alguien de la hermandad
+--  * Sonido cuando alguien escribe en el chat de hermandad
+--  * Aviso sonoro cuando aparecen en el chat ciertas palabras
+-- Los sonidos se eligen de LibSharedMedia (LizeUI registra los suyos en
+-- media/sharedmedia.lua; tambien salen los de otros addons).
+-- ---------------------------------------------------------------------------
+local LSM = LibStub and LibStub("LibSharedMedia-3.0", true)
+
+-- Reproduce un sonido de SharedMedia; si el guardado ya no existe (por
+-- ejemplo, un sonido eliminado), usa el sonido por defecto de esa opcion.
+function Utilities:PlaySoundByName(name, fallback)
+    if not LSM or name == "None" then return end
+    local file = name and LSM:Fetch("sound", name, true)
+    if not file and fallback then file = LSM:Fetch("sound", fallback, true) end
+    if file then PlaySoundFile(file, "Master") end
+end
+
+-- "Desactivar aviso de hermandad": apaga la opcion del juego "Aviso de miembros
+-- de la hermandad" (CVar guildMemberNotify), que es la que avisa y hace sonar la
+-- conexion de los miembros de la hermandad. Al desmarcar se vuelve a encender
+-- solo si la apago LizeUI. Ademas se silencia el archivo de sonido de conexion.
+local GUILD_LOGIN_GAME_SOUNDS = {
+    "Sound\\Interface\\FriendJoin.ogg",
+}
+local guildLoginMuted = false
+
+local function getCVarValue(name)
+    if C_CVar and C_CVar.GetCVar then return C_CVar.GetCVar(name) end
+    return GetCVar and GetCVar(name)
+end
+local function setCVarValue(name, value)
+    if C_CVar and C_CVar.SetCVar then return pcall(C_CVar.SetCVar, name, value) end
+    if SetCVar then return pcall(SetCVar, name, value) end
+end
+
+local function applyGuildLoginGameSound()
+    local mute = setting("chatMuteGuildLogin") and true or false
+
+    -- Opcion del juego: aviso de conexion de la hermandad
+    local current = getCVarValue("guildMemberNotify")
+    if current ~= nil and db then
+        if mute and current ~= "0" then
+            setCVarValue("guildMemberNotify", "0")
+            db.guildMemberNotifyChangedByLizeUI = true
+        elseif not mute and db.guildMemberNotifyChangedByLizeUI then
+            setCVarValue("guildMemberNotify", "1")
+            db.guildMemberNotifyChangedByLizeUI = nil
+        end
+    end
+
+    -- Archivo de sonido de conexion
+    if mute == guildLoginMuted or not MuteSoundFile then return end
+    for _, sound in ipairs(GUILD_LOGIN_GAME_SOUNDS) do
+        if mute then pcall(MuteSoundFile, sound) else pcall(UnmuteSoundFile, sound) end
+    end
+    guildLoginMuted = mute
+end
+
+-- Patrones a partir de los textos del cliente (sirven en cualquier idioma)
+local function toPattern(globalString)
+    if type(globalString) ~= "string" then return nil end
+    local pattern = globalString:gsub("([%(%)%.%+%-%*%?%[%]%^%$])", "%%%1")
+    pattern = pattern:gsub("%%s", "(.-)"):gsub("%%d", "%%d+")
+    return "^" .. pattern .. "$"
+end
+local ONLINE_PATTERN = toPattern(ERR_FRIEND_ONLINE_SS)   -- "|Hplayer:%s|h[%s]|h se ha conectado."
+local OFFLINE_PATTERN = toPattern(ERR_FRIEND_OFFLINE_S)  -- "%s se ha desconectado."
+
+local guildMembers = {}
+
+local function shortName(name)
+    if not name then return nil end
+    name = name:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    return (strsplit("-", name))
+end
+
+local function rebuildGuildRoster()
+    wipe(guildMembers)
+    if not IsInGuild() or not GetNumGuildMembers then return end
+    local total = GetNumGuildMembers() or 0
+    for i = 1, total do
+        local name = GetGuildRosterInfo(i)
+        name = shortName(name)
+        if name then guildMembers[name] = true end
+    end
+end
+
+local function isCharacterFriend(name)
+    if C_FriendList and C_FriendList.IsFriend then
+        local ok, result = pcall(C_FriendList.IsFriend, name)
+        return ok and result
+    end
+    return false
+end
+
+-- Devuelve "online"/"offline" y el nombre si el mensaje es de un miembro de la
+-- hermandad (los amigos de personaje se tratan como amigos, no se tocan)
+local function parseGuildLogin(message)
+    message = Safe(message)
+    if type(message) ~= "string" then return nil end
+    local state, name
+    if ONLINE_PATTERN then
+        local link, display = message:match(ONLINE_PATTERN)
+        if link then state, name = "online", display or link end
+    end
+    if not state and OFFLINE_PATTERN then
+        local who = message:match(OFFLINE_PATTERN)
+        if who then state, name = "offline", who end
+    end
+    if not state then return nil end
+    name = shortName(name)
+    if not name or isCharacterFriend(name) then return nil end
+    -- Estos avisos solo los generan amigos de personaje y miembros de la hermandad:
+    -- si no es amigo y estamos en hermandad, es de la hermandad (asi funciona
+    -- aunque la lista de la hermandad aun no se haya cargado tras un /reload)
+    if not guildMembers[name] and not IsInGuild() then return nil end
+    return state, name
+end
+
+local function guildLoginFilter(_, _, message, ...)
+    if setting("chatHideGuildLogin") and parseGuildLogin(message) then
+        return true
+    end
+    return false, message, ...
+end
+
+local KEYWORD_EVENTS = {
+    "CHAT_MSG_CHANNEL", "CHAT_MSG_SAY", "CHAT_MSG_YELL", "CHAT_MSG_GUILD", "CHAT_MSG_OFFICER",
+    "CHAT_MSG_PARTY", "CHAT_MSG_PARTY_LEADER", "CHAT_MSG_RAID", "CHAT_MSG_RAID_LEADER",
+    "CHAT_MSG_INSTANCE_CHAT", "CHAT_MSG_INSTANCE_CHAT_LEADER", "CHAT_MSG_WHISPER", "CHAT_MSG_BN_WHISPER",
+}
+
+local keywordCacheSource, keywordCache = nil, {}
+local function getKeywords()
+    local source = tostring(setting("chatKeywords") or "")
+    if source ~= keywordCacheSource then
+        keywordCacheSource = source
+        wipe(keywordCache)
+        for word in source:gmatch("[^,]+") do
+            word = strlower(strtrim(word))
+            if word ~= "" then keywordCache[#keywordCache + 1] = word end
+        end
+    end
+    return keywordCache
+end
+
+local lastKeywordSound, lastGuildChatSound, lastWhisperSound = 0, 0, 0
+local chatFrame = CreateFrame("Frame")
+
+chatFrame:SetScript("OnEvent", function(_, event, message, sender)
+    if event == "GUILD_ROSTER_UPDATE" or event == "PLAYER_GUILD_UPDATE" then
+        rebuildGuildRoster()
+        return
+    end
+    if event == "PLAYER_ENTERING_WORLD" then
+        -- Volver a aplicar el silencio del sonido de conexion tras cada carga
+        Utilities:ReapplyGuildLoginMute()
+        return
+    end
+    message, sender = Safe(message), Safe(sender)
+    if type(message) ~= "string" then return end
+    if type(sender) == "string" and shortName(sender) == UnitName("player") then return end
+
+    -- Palabras clave (tienen prioridad: si suena su aviso no suena el de hermandad)
+    if setting("chatKeywordAlert") then
+        local words = getKeywords()
+        local text = strlower(message)
+        for _, word in ipairs(words) do
+            if text:find(word, 1, true) then
+                if GetTime() - lastKeywordSound > 2 then
+                    lastKeywordSound = GetTime()
+                    Utilities:PlaySoundByName(setting("chatKeywordSound"), Utilities.defaults.chatKeywordSound)
+                end
+                return
+            end
+        end
+    end
+
+    -- Susurros
+    if (event == "CHAT_MSG_WHISPER" or event == "CHAT_MSG_BN_WHISPER") and setting("chatWhisperSound") then
+        if GetTime() - lastWhisperSound > 1 then
+            lastWhisperSound = GetTime()
+            Utilities:PlaySoundByName(setting("chatWhisperSoundName"), Utilities.defaults.chatWhisperSoundName)
+        end
+        return
+    end
+
+    -- Mensajes en el chat de hermandad
+    if event == "CHAT_MSG_GUILD" and setting("chatGuildChatSound") and GetTime() - lastGuildChatSound > 1 then
+        lastGuildChatSound = GetTime()
+        Utilities:PlaySoundByName(setting("chatGuildChatSoundName"), Utilities.defaults.chatGuildChatSoundName)
+    end
+end)
+
+function Utilities:ReapplyGuildLoginMute()
+    guildLoginMuted = false
+    if setting("chatMuteGuildLogin") then applyGuildLoginGameSound() end
+end
+chatFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+
+local filterInstalled = false
+function Utilities:RefreshChat()
+    applyGuildLoginGameSound()
+    -- La lista de la hermandad solo hace falta para ocultar sus conexiones
+    if setting("chatHideGuildLogin") then
+        chatFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
+        chatFrame:RegisterEvent("PLAYER_GUILD_UPDATE")
+        rebuildGuildRoster()
+        if C_GuildInfo and C_GuildInfo.GuildRoster then C_GuildInfo.GuildRoster() elseif GuildRoster then GuildRoster() end
+    else
+        chatFrame:UnregisterEvent("GUILD_ROSTER_UPDATE")
+        chatFrame:UnregisterEvent("PLAYER_GUILD_UPDATE")
+    end
+    -- El filtro se instala una vez y comprueba el ajuste en cada mensaje
+    if setting("chatHideGuildLogin") and not filterInstalled then
+        local addFilter = (ChatFrameUtil and ChatFrameUtil.AddMessageEventFilter) or ChatFrame_AddMessageEventFilter
+        if addFilter then
+            addFilter("CHAT_MSG_SYSTEM", guildLoginFilter)
+            filterInstalled = true
+        end
+    end
+    for _, event in ipairs(KEYWORD_EVENTS) do
+        local wanted = setting("chatKeywordAlert")
+            or (event == "CHAT_MSG_GUILD" and setting("chatGuildChatSound"))
+            or ((event == "CHAT_MSG_WHISPER" or event == "CHAT_MSG_BN_WHISPER") and setting("chatWhisperSound"))
+        if wanted then chatFrame:RegisterEvent(event) else chatFrame:UnregisterEvent(event) end
+    end
+end
+
 function Utilities:Refresh()
     self:RefreshTooltip()
     self:RefreshAutomation()
+    self:RefreshChat()
 end
 
 -- Opciones equivalentes de Leatrix Plus: si estan activas a la vez, la accion
@@ -683,4 +1034,16 @@ end
 function Utilities:Init(database)
     db = database
     self:Refresh()
+    self:HookAuctionator()
+    if not auctionHooked then
+        -- Por si Auctionator carga despues que LizeUI
+        local watcher = CreateFrame("Frame")
+        watcher:RegisterEvent("ADDON_LOADED")
+        watcher:SetScript("OnEvent", function(frame, _, name)
+            if name == "Auctionator" then
+                Utilities:HookAuctionator()
+                frame:UnregisterAllEvents()
+            end
+        end)
+    end
 end
