@@ -20,6 +20,10 @@ local function initDatabase()
     if LizeUIDB.eliminarBotonIssueReport == nil then
         LizeUIDB.eliminarBotonIssueReport = true
     end
+    -- Opcion retirada (botones de zoom del minimapa)
+    LizeUIDB.fixMinimapZoomButtons = nil
+    -- FixScripts: siempre activo, no se puede desactivar
+    LizeUIDB.fixBBFAutoHideButtons = true
     if LizeUIDB.marcosIconosBuffDebuff == nil then
         LizeUIDB.marcosIconosBuffDebuff = true
     end
@@ -841,6 +845,29 @@ local function updateIssueReportButton(hidden)
     end
 end
 
+-- FixScripts: "Ocultar botones del minimapa" de BetterBlizzFrames (hideMinimapButtons)
+-- congela la pantalla al pasar el raton por el minimapa: ejecuta codigo en cada entrada
+-- y salida del minimapa y de cada boton de addon. LizeUI la mantiene siempre apagada.
+local bbfHideFramesWrapped = false
+local function disableBBFAutoHideButtons()
+    local db = BetterBlizzFramesDB
+    if type(db) == "table" and db.hideMinimapButtons then
+        db.hideMinimapButtons = false
+    end
+    -- Si se vuelve a marcar desde BBF, se apaga antes de que BBF la aplique
+    local bbf = _G.BBF
+    if not bbfHideFramesWrapped and type(bbf) == "table" and type(bbf.HideFrames) == "function" then
+        bbfHideFramesWrapped = true
+        local original = bbf.HideFrames
+        bbf.HideFrames = function(...)
+            if type(BetterBlizzFramesDB) == "table" then
+                BetterBlizzFramesDB.hideMinimapButtons = false
+            end
+            return original(...)
+        end
+    end
+end
+
 -- En combate Blizzard marca sus botones nativos de auras como "forbidden":
 -- llamar a cualquier metodo sobre ellos desde codigo de addon lanza error.
 -- IsForbidden() es el unico metodo permitido desde codigo inseguro.
@@ -893,16 +920,18 @@ local function updateBuffDebuffBorders(enabled)
 
     local function applyBorderToButtonUnsafe(button, isDebuff)
         local anchor = button.bbfIcon or button
-        -- Recrear la textura siempre para evitar que atlas/texture se queden pegados
-        if button.lizeUIBorder then
-            button.lizeUIBorder:Hide()
-            button.lizeUIBorder = nil
+        -- Una sola textura por boton, reutilizada en cada refresco: las texturas no se
+        -- pueden destruir y crear una nueva cada vez acumulaba miles en sesiones largas.
+        local border = button.lizeUIBorder
+        if not border then
+            if not enabled then return end
+            border = button:CreateTexture(nil, "OVERLAY", nil, 7)
+            button.lizeUIBorder = border
         end
-        local border = button:CreateTexture(nil, "OVERLAY", nil, 7)
+        border:ClearAllPoints()
         border:SetPoint("CENTER", anchor, "CENTER", 0, 0)
         border:SetAtlas("Adventures-Spell-Border")
-        button.lizeUIBorder = border
-        button.lizeUIBorder:SetSize(35, 35)
+        border:SetSize(35, 35)
         if isDebuff then
             if enabled then
                 if button.Border then button.Border:Hide() end
@@ -1056,17 +1085,17 @@ local function updateTargetAuraBorders(enabled)
         end
         borderSize = button.lizeUITargetBorderSize
 
-        if button.lizeUITargetBorder then
-            button.lizeUITargetBorder:Hide()
-            button.lizeUITargetBorder:SetParent(nil)
-            button.lizeUITargetBorder = nil
+        -- Una sola textura por boton, reutilizada (ver marcos de buffs)
+        local border = button.lizeUITargetBorder
+        if not border then
+            if not enabled then return end
+            border = button:CreateTexture(nil, "ARTWORK", nil, 7)
+            button.lizeUITargetBorder = border
         end
-
-        local border = button:CreateTexture(nil, "ARTWORK", nil, 7)
+        border:ClearAllPoints()
         border:SetPoint("CENTER", anchor, "CENTER", 0, 0)
         border:SetAtlas("Adventures-Spell-Border")
-        button.lizeUITargetBorder = border
-        button.lizeUITargetBorder:SetSize(borderSize, borderSize)
+        border:SetSize(borderSize, borderSize)
 
         if enabled then
             if button.Border then button.Border:Hide() end
@@ -1917,7 +1946,7 @@ local function createSettings()
     utilScroll:SetPoint("TOPLEFT", utilFrame, "TOPLEFT", 0, -2)
     utilScroll:SetPoint("BOTTOMRIGHT", utilFrame, "BOTTOMRIGHT", -26, 2)
     local utilPanel = CreateFrame("Frame", nil, utilScroll)
-    utilPanel:SetSize(640, 925)
+    utilPanel:SetSize(640, 1000)
     utilScroll:SetScrollChild(utilPanel)
     utilScroll:SetScript("OnSizeChanged", function(_, width)
         if width and width > 0 then utilPanel:SetWidth(width) end
@@ -2090,8 +2119,35 @@ local function createSettings()
     end)
     chatWordsBox:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
     chatWordsBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-    chatWordsBox:SetScript("OnEditFocusLost", saveChatWords)
-    chatWordsBox.Refresh = function(self) self:SetText(database.chatKeywords or "") end
+    -- Al perder el foco: quitar espacios sobrantes y palabras repetidas
+    local function normalizeChatWords(text)
+        local seen, words = {}, {}
+        for word in (text or ""):gmatch("[^,]+") do
+            word = strtrim(word)
+            local key = strlower(word)
+            if word ~= "" and not seen[key] then
+                seen[key] = true
+                words[#words + 1] = word
+            end
+        end
+        return table.concat(words, ", ")
+    end
+    -- La caja se rellena mientras esta oculta: sin volver el cursor al inicio
+    -- el texto queda desplazado fuera de la vista y parece vacia tras /reload.
+    local function showChatWords(self)
+        self:SetText(database.chatKeywords or "")
+        self:SetCursorPosition(0)
+    end
+    chatWordsBox:SetScript("OnEditFocusLost", function(self)
+        database.chatKeywords = normalizeChatWords(self:GetText())
+        showChatWords(self)
+    end)
+    chatWordsBox:SetScript("OnShow", function(self)
+        if not self:HasFocus() then showChatWords(self) end
+    end)
+    chatWordsBox.Refresh = function(self)
+        if not self:HasFocus() then showChatWords(self) end
+    end
     utilRefreshers[#utilRefreshers + 1] = chatWordsBox
     local chatWords = { widget = chatWordsBox, label = chatWordsLabel }
 
@@ -2190,8 +2246,15 @@ local function createSettings()
     keywordBox:SetScript("OnEditFocusLost", function(self)
         saveKeyword()
         self:SetText(database.inviteKeyword)
+        self:SetCursorPosition(0)
     end)
-    keywordBox.Refresh = function(self) self:SetText(database.inviteKeyword or "inv") end
+    keywordBox:SetScript("OnShow", function(self)
+        if not self:HasFocus() then self:Refresh() end
+    end)
+    keywordBox.Refresh = function(self)
+        self:SetText(database.inviteKeyword or "inv")
+        self:SetCursorPosition(0)
+    end
     utilRefreshers[#utilRefreshers + 1] = keywordBox
     local inviteKeyword = { widget = keywordBox, label = keywordLabel }
 
@@ -2203,14 +2266,43 @@ local function createSettings()
     local lootDelay = addUtilSlider("LizeUIFasterLootDelaySlider", 0.1, 0.3, 0.1, "fasterLootDelay", COL2 + 5, -672, 1,
         L.FMT_LOOT_DELAY)
 
+    -- Seccion: FixScripts (arreglos de errores de otros addons). Siempre activos:
+    -- la casilla se ve marcada pero no se puede desmarcar; el icono "i" explica por que.
+    createDivider(utilPanel, L.DIV_FIXSCRIPTS, -830)
+    local bbfFixCheck = createSettingsCheckboxCustom(utilPanel, L.OPT_FIX_BBF_AUTOHIDE,
+        { "TOPLEFT", utilPanel, "TOPLEFT", COL1, -845 }, "fixBBFAutoHideButtons")
+    bbfFixCheck:SetScript("OnClick", function(self)
+        self:SetChecked(true)
+        database.fixBBFAutoHideButtons = true
+    end)
+    utilRefreshers[#utilRefreshers + 1] = bbfFixCheck
+    local bbfFixInfo = CreateFrame("Frame", nil, utilPanel)
+    bbfFixInfo:SetSize(18, 18)
+    bbfFixInfo:SetPoint("RIGHT", bbfFixCheck, "LEFT", -2, 0)
+    local bbfFixInfoIcon = bbfFixInfo:CreateTexture(nil, "ARTWORK")
+    bbfFixInfoIcon:SetAllPoints()
+    bbfFixInfoIcon:SetTexture("Interface\\FriendsFrame\\InformationIcon")
+    local function showBBFFixInfo(owner)
+        GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+        GameTooltip:SetText(L.OPT_FIX_BBF_AUTOHIDE, 1, 1, 1)
+        GameTooltip:AddLine(L.OPT_FIX_BBF_AUTOHIDE_DESC, nil, nil, nil, true)
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(L.OPT_FIX_BBF_AUTOHIDE_LOCKED, 1, 0.82, 0, true)
+        GameTooltip:Show()
+    end
+    bbfFixInfo:SetScript("OnEnter", showBBFFixInfo)
+    bbfFixInfo:SetScript("OnLeave", GameTooltip_Hide)
+    bbfFixCheck:SetScript("OnEnter", showBBFFixInfo)
+    bbfFixCheck:SetScript("OnLeave", GameTooltip_Hide)
+
     -- Seccion: Interfaz
-    createDivider(utilPanel, L.DIV_INTERFACE, -830)
-    local issueReport = addUtilCheckbox(L.OPT_ISSUE_REPORT, COL1, -845, "eliminarBotonIssueReport",
+    createDivider(utilPanel, L.DIV_INTERFACE, -905)
+    local issueReport = addUtilCheckbox(L.OPT_ISSUE_REPORT, COL1, -920, "eliminarBotonIssueReport",
         function() updateIssueReportButton(database.eliminarBotonIssueReport == true) end,
         L.OPT_ISSUE_REPORT_DESC)
 
     local utilStatusText = utilPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    utilStatusText:SetPoint("TOPLEFT", utilPanel, "TOPLEFT", 20, -890)
+    utilStatusText:SetPoint("TOPLEFT", utilPanel, "TOPLEFT", 20, -965)
     utilStatusText:SetWidth(640)
     utilStatusText:SetJustifyH("LEFT")
     utilStatusText:SetJustifyV("TOP")
@@ -2705,10 +2797,14 @@ local function registerAuraBorderWatcher()
     if auraWatcherRegistered then return end
     auraWatcherRegistered = true
     local f = CreateFrame("Frame")
-    f:RegisterEvent("UNIT_AURA")
+    if f.RegisterUnitEvent then
+        f:RegisterUnitEvent("UNIT_AURA", "player", "target")
+    else
+        f:RegisterEvent("UNIT_AURA")
+    end
     f:RegisterEvent("PLAYER_ENTERING_WORLD")
     f:RegisterEvent("PLAYER_TARGET_CHANGED")
-    local lastUpdate = 0
+    local auraUpdatePending = false
     local targetUpdateToken = 0
     local function applyBorders()
         if database.marcosIconosBuffDebuff then
@@ -2729,10 +2825,14 @@ local function registerAuraBorderWatcher()
             end)
             return
         end
-        local now = GetTime()
-        if now - lastUpdate < 0.5 then return end
-        lastUpdate = now
-        applyBorders()
+        -- Varias auras cambian a la vez (p. ej. al entrar en combate): un solo
+        -- refresco poco despues en lugar de uno por evento, sin perder el ultimo cambio.
+        if auraUpdatePending then return end
+        auraUpdatePending = true
+        C_Timer.After(0.2, function()
+            auraUpdatePending = false
+            applyBorders()
+        end)
     end)
 end
 
@@ -2781,6 +2881,7 @@ end
 
 local function applyAllSettings()
     updateIssueReportButton(database.eliminarBotonIssueReport == true)
+    disableBBFAutoHideButtons()
     updateBuffDebuffBorders(database.marcosIconosBuffDebuff == true)
     updateTargetAuraBorders(database.marcosIconosBuffDebuff == true)
     applyDarkModeSettings()
@@ -2828,6 +2929,8 @@ addon:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" then
         if arg1 == addonName then
             initDatabase()
+            -- BBF carga antes que LizeUI: apagar su auto-hide antes de que lo aplique al iniciar sesion
+            disableBBFAutoHideButtons()
         elseif arg1 == "Blizzard_PTRFeedback" then
             updateIssueReportButton(database.eliminarBotonIssueReport == true)
         elseif arg1 == "BetterBlizzFrames" then

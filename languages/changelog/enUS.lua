@@ -10,6 +10,29 @@ ns.Changelogs = ns.Changelogs or {}
 
 ns.Changelogs.en = {
     {
+        version = "2.0.2",
+        date = "11/07/2026",
+        title = "FixScripts, keyword highlight and performance",
+        lines = {
+            "# FixScripts",
+            "- New FixScripts section in Utilities, above WOW Beta Interfaces.",
+            "- Disable BBF button auto-hide (FreezeWindows): keeps the BetterBlizzFrames \"Hide minimap buttons\" option turned off, which froze the screen when hovering the minimap.",
+            "- Always enabled and cannot be disabled. The \"i\" icon on its left explains what it does and why.",
+            "",
+            "# Chat",
+            "- Keyword alert words are highlighted in color inside the message, without breaking item links or icons.",
+            "- Fixed the chat words box, which looked empty after /reload (the words were saved).",
+            "- When leaving the box, extra spaces and repeated words are removed.",
+            "- The invite keyword box had the same issue and is fixed too.",
+            "",
+            "# Performance",
+            "- Buff, debuff and target aura borders are reused instead of being created again on every update (thousands piled up in long sessions).",
+            "- Aura changes are grouped into a single update and the last change is no longer lost.",
+            "- Only player and target aura changes are listened to.",
+            "- The guild roster is scanned at most once every 10 seconds.",
+        },
+    },
+    {
         version = "2.0.0",
         date = "11/07/2026",
         title = "Major update: new panel, enhanced chat and translations",

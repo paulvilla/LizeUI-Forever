@@ -866,6 +866,20 @@ local function rebuildGuildRoster()
     end
 end
 
+-- GUILD_ROSTER_UPDATE salta muchas veces seguidas (sobre todo con la ventana de
+-- hermandad abierta): se reconstruye una sola vez cada 10 s como maximo.
+local rosterRebuildPending, lastRosterRebuild = false, 0
+local function scheduleGuildRosterRebuild()
+    if rosterRebuildPending then return end
+    local wait = math.max(0, 10 - (GetTime() - lastRosterRebuild))
+    rosterRebuildPending = true
+    C_Timer.After(wait, function()
+        rosterRebuildPending = false
+        lastRosterRebuild = GetTime()
+        rebuildGuildRoster()
+    end)
+end
+
 local function isCharacterFriend(name)
     if C_FriendList and C_FriendList.IsFriend then
         local ok, result = pcall(C_FriendList.IsFriend, name)
@@ -925,12 +939,75 @@ local function getKeywords()
     return keywordCache
 end
 
+-- Resaltado de las palabras clave dentro del mensaje.
+-- Color violeta: no coincide con ningun color de tipo de chat por defecto
+-- (blanco, rojo, azul, verdes, rosa, naranja, amarillo y cian).
+local KEYWORD_HIGHLIGHT = "|cffb469ff"
+
+-- Colorea las palabras en un trozo de texto plano (sin enlaces ni codigos)
+local function highlightPlain(text, words)
+    local lower = strlower(text)
+    local out, pos = {}, 1
+    while pos <= #text do
+        local bestStart, bestEnd
+        for _, word in ipairs(words) do
+            local a, b = lower:find(word, pos, true)
+            if a and (not bestStart or a < bestStart or (a == bestStart and b > bestEnd)) then
+                bestStart, bestEnd = a, b
+            end
+        end
+        if not bestStart then break end
+        out[#out + 1] = text:sub(pos, bestStart - 1)
+        out[#out + 1] = KEYWORD_HIGHLIGHT .. text:sub(bestStart, bestEnd) .. "|r"
+        pos = bestEnd + 1
+    end
+    if pos == 1 then return text, false end
+    out[#out + 1] = text:sub(pos)
+    return table.concat(out), true
+end
+
+-- Deja intactos los enlaces (|H...|h...|h), texturas (|T...|t), atlas (|A...|a) y codigos de color
+local PROTECTED_PATTERNS = { "|H.-|h.-|h", "|T.-|t", "|A.-|a", "|c%x%x%x%x%x%x%x%x", "|r" }
+local function highlightKeywords(message, words)
+    local out, pos, changed = {}, 1, false
+    while pos <= #message do
+        local nextStart, nextEnd
+        for _, pattern in ipairs(PROTECTED_PATTERNS) do
+            local a, b = message:find(pattern, pos)
+            if a and (not nextStart or a < nextStart) then nextStart, nextEnd = a, b end
+        end
+        local plainEnd = nextStart and nextStart - 1 or #message
+        if plainEnd >= pos then
+            local piece, hit = highlightPlain(message:sub(pos, plainEnd), words)
+            out[#out + 1] = piece
+            changed = changed or hit
+        end
+        if not nextStart then break end
+        out[#out + 1] = message:sub(nextStart, nextEnd)
+        pos = nextEnd + 1
+    end
+    return changed and table.concat(out) or message
+end
+
+local function keywordHighlightFilter(_, _, message, ...)
+    if setting("chatKeywordAlert") then
+        local plain = Safe(message)
+        if type(plain) == "string" and plain ~= "" then
+            local words = getKeywords()
+            if #words > 0 then
+                return false, highlightKeywords(plain, words), ...
+            end
+        end
+    end
+    return false, message, ...
+end
+
 local lastKeywordSound, lastGuildChatSound, lastWhisperSound = 0, 0, 0
 local chatFrame = CreateFrame("Frame")
 
 chatFrame:SetScript("OnEvent", function(_, event, message, sender)
     if event == "GUILD_ROSTER_UPDATE" or event == "PLAYER_GUILD_UPDATE" then
-        rebuildGuildRoster()
+        scheduleGuildRosterRebuild()
         return
     end
     if event == "PLAYER_ENTERING_WORLD" then
@@ -980,6 +1057,7 @@ end
 chatFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 
 local filterInstalled = false
+local keywordFilterInstalled = false
 function Utilities:RefreshChat()
     applyGuildLoginGameSound()
     -- La lista de la hermandad solo hace falta para ocultar sus conexiones
@@ -998,6 +1076,16 @@ function Utilities:RefreshChat()
         if addFilter then
             addFilter("CHAT_MSG_SYSTEM", guildLoginFilter)
             filterInstalled = true
+        end
+    end
+    -- Filtro de resaltado de palabras clave (se instala una vez y comprueba el ajuste)
+    if setting("chatKeywordAlert") and not keywordFilterInstalled then
+        local addFilter = (ChatFrameUtil and ChatFrameUtil.AddMessageEventFilter) or ChatFrame_AddMessageEventFilter
+        if addFilter then
+            for _, event in ipairs(KEYWORD_EVENTS) do
+                addFilter(event, keywordHighlightFilter)
+            end
+            keywordFilterInstalled = true
         end
     end
     for _, event in ipairs(KEYWORD_EVENTS) do

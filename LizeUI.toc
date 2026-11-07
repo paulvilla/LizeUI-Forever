@@ -4,7 +4,7 @@
 ## Notes: LizeUI Forever importa perfiles guardados de BetterBlizzFrames, BetterBlizzPlates y Details.
 ## Author: Local
 ## X-Curse-Project-ID: 1710996
-## Version: 2.0.0
+## Version: 2.0.2
 ## OptionalDeps: BetterBlizzFrames, BetterBlizzPlates, Details, LibSharedMedia-3.0, RXPGuides, Auctionator
 ## SavedVariables: LizeUIDB, LoadProfilesDB
 ## SavedVariablesPerCharacter: LizeUICharDB

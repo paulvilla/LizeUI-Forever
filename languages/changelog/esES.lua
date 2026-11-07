@@ -10,6 +10,29 @@ ns.Changelogs = ns.Changelogs or {}
 
 ns.Changelogs.es = {
     {
+        version = "2.0.2",
+        date = "07/11/2026",
+        title = "FixScripts, resaltado de palabras y rendimiento",
+        lines = {
+            "# FixScripts",
+            "- Nueva sección FixScripts en Utilidades, encima de Interfaces Betas WOW.",
+            "- Desactivar auto-hide botones de BBF (FreezeWindows): mantiene apagada la opción \"Ocultar botones del minimapa\" de BetterBlizzFrames, que congelaba la pantalla al pasar el ratón por el minimapa.",
+            "- Siempre activo y no se puede desactivar. El icono \"i\" de su izquierda explica qué hace y por qué.",
+            "",
+            "# Chat",
+            "- Las palabras del aviso por palabras aparecen resaltadas en color dentro del mensaje, sin romper enlaces de objetos ni iconos.",
+            "- Corregida la casilla de palabras del chat, que aparecía vacía tras /reload (las palabras sí se guardaban).",
+            "- Al salir de la casilla se quitan los espacios sobrantes y las palabras repetidas.",
+            "- La casilla de la palabra de invitación tenía el mismo fallo y también está corregida.",
+            "",
+            "# Rendimiento",
+            "- Los marcos de buffs, debuffs y del objetivo se reutilizan en vez de crearse de nuevo en cada actualización (en sesiones largas se acumulaban miles).",
+            "- Los cambios de auras se agrupan en una sola actualización y ya no se pierde el último cambio.",
+            "- Solo se escuchan los cambios de auras del jugador y del objetivo.",
+            "- La lista de la hermandad se recorre como mucho una vez cada 10 segundos.",
+        },
+    },
+    {
         version = "2.0.0",
         date = "07/11/2026",
         title = "Gran actualización: nuevo panel, chat mejorado y traducciones",
