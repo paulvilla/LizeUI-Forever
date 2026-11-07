@@ -34,7 +34,7 @@ The first time you log in with each character, an **install window** opens with 
 *   Guild ranks and the unit's target.
 *   Background by faction, hide in combat and hide the health bar.
 *   Cursor anchor, offset and scale.
-*   **Net auction price** (with Auctionator): shows what you would really earn after the deposit.
+*   **Tooltip:** new "Net" line under the Auctionator price: price times the stack units minus the 5% auction house cut. Enabled by default.
 
 ### Automation
 
@@ -115,7 +115,7 @@ La primera vez que entras con cada personaje se abre una **ventana de instalaci�
 *   Rangos de hermandad y objetivo de la unidad.
 *   Fondo según la facción, ocultar en combate y ocultar la barra de salud.
 *   Anclaje al cursor, desplazamiento y escala.
-*   **Precio neto de subasta** (con Auctionator): muestra lo que ganarías de verdad, descontando el depósito.
+*   **Tooltip:** nueva línea "Neto" bajo el precio de Auctionator: precio por las unidades del stack menos la comisión del 5 % de la casa de subastas. Activo por defecto.
 
 ### Automatización
 
